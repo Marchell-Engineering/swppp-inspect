@@ -581,6 +581,11 @@ function carriedCard() {
         h('div', { class: 'sub' }, `Opened ${mdy(x.date)}${x.inspector ? ' by ' + x.inspector : ''}${x.due ? ' · due ' + mdy(x.due) : ''}`),
         x.description ? h('p', { style: 'margin:6px 0' }, x.description) : null,
         x.location ? h('div', { class: 'sub' }, x.location) : null,
+        // marked fixed from the report email's link: the inspector confirms it on site (Att. D II.J.2)
+        x.reported ? h('div', { class: 'banner blue', style: 'margin:8px 0 0' },
+          h('strong', {}, `${x.reported.by} marked this fixed ${shortDate(x.reported.at, R.tz)}`),
+          x.reported.note ? `: "${x.reported.note}"` : '', x.reported.photo ? ' (photo in the job folder)' : '',
+          '. Check it, and mark it Fixed only if it is.') : null,
         h('div', { class: 'seg', style: 'margin-top:10px' },
           segBtn('Still open', x.status === 'open', '', () => { x.status = 'open'; x.closed_on = ''; save(); repaint(['carried']); }),
           segBtn('Fixed', x.status === 'closed', 'good', () => { x.status = 'closed'; x.closed_on = x.closed_on || today; save(); repaint(['carried']); })));

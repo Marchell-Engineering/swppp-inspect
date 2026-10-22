@@ -315,6 +315,7 @@ function itemsBlock(r, photoNumbers) {
               x.description || '',
               x.location ? { text: x.location, color: MUTED, fontSize: 7.5 } : '',
               x.gps ? { text: `${x.gps.lat.toFixed(5)}, ${x.gps.lon.toFixed(5)}`, link: `https://www.google.com/maps/search/?api=1&query=${x.gps.lat},${x.gps.lon}`, color: BLUE, decoration: 'underline', fontSize: 7.5 } : '',
+              x.reported ? { text: `Reported fixed by ${x.reported.by}, ${day(localDay(x.reported.at, tz))}${x.reported.note ? `: ${x.reported.note}` : ''}`, color: MUTED, fontSize: 7.5 } : '',
               x.close_note ? { text: `Closed: ${x.close_note}`, fontSize: 7.5 } : '',
             ],
           },
