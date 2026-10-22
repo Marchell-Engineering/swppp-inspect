@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#24408e">
+  <meta name="color-scheme" content="light">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="SWPPP Inspect">
+  <meta name="robots" content="noindex">
+  <title>SWPPP Inspect</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="img/icon-192.png">
+  <link rel="apple-touch-icon" href="img/icon-192.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="top">
+    <button class="top-back" id="back" hidden aria-label="Back">‹</button>
+    <div class="top-title" id="title">SWPPP Inspect</div>
+    <div class="top-net" id="net"></div>
+  </header>
+  <nav class="jump" id="jump" hidden></nav>
+  <main id="app"><p class="loading">Loading…</p></main>
+  <div class="toast" id="toast" hidden></div>
+  <script src="vendor/pdfmake.min.js" defer></script>
+  <script src="vendor/vfs_fonts.js" defer></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
