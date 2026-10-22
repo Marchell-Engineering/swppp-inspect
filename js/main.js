@@ -3,7 +3,7 @@
 
 import { kv, reports, blobs, persist, uid } from './store.js';
 import { signIn, refreshConfig, flushQueue, net } from './api.js';
-import { fetchForecast, fetchGauges, lastRain, classify, whatsDue, mergeSeen, unionSeen, typeReasons, localDate, fmtLocal } from './weather.js';
+import { fetchForecast, fetchGauges, lastRain, classify, whatsDue, mergeSeen, unionSeen, typeReasons, eventText, localDate, fmtLocal } from './weather.js';
 import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL } from './checklist.js';
 import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, SigPad } from './media.js';
 import { buildPdf } from './pdf.js';
@@ -104,7 +104,9 @@ function renderSignIn(error) {
     btn.disabled = true;
     btn.textContent = 'Signing in…';
     try {
-      await signIn(input.value);
+      const out = await signIn(input.value);
+      // the storms the script knows (other phones, the laptop's record), so the first report has them too
+      for (const site of out.sites) await kv.set('seen:' + site.id, unionSeen(await kv.get('seen:' + site.id), site.qpes || []));
       go({ name: 'home' }, true);
       prefetchWeather();
     } catch (e) {
@@ -289,6 +291,7 @@ async function startInspection(site) {
     site: {
       id: site.id, name: site.name, address: site.address, wdid: site.wdid, risk_level: site.risk_level,
       permit: site.permit || {}, lat: site.lat, lon: site.lon,
+      trial: !!site.trial, test: !!site.test, email_to: site.email_to === undefined ? null : site.email_to,
     },
     inspector: { ...cfg.inspector },
     started_ms: now,
@@ -305,7 +308,7 @@ async function startInspection(site) {
     notes: {},
     site_info: {
       phase: last.phase || '', activities: last.activities || '', area: last.area || '', completed: '',
-      weather_today: '', gauge_in: '', event: 'N/A', comments: '',
+      weather_today: '', gauge_in: '', event: '', event_auto: true, comments: '',
     },
     carried: (site.open_items || []).map((x) => ({ ...x, status: null, closed_on: '', close_note: '' })),
     items: [],
@@ -356,10 +359,6 @@ function applyWeather(wx) {
   R.forecast_checked = !!f;
   if (f) {
     if (!R.site_info.weather_today && f.current) R.site_info.weather_today = `${f.current.temp}°${f.current.unit}, ${f.current.short}`;
-    const during = f.qpes.find((q) => q.start_ms <= Date.now() && Date.now() < q.end_ms);
-    if (during && (!R.site_info.event || R.site_info.event === 'N/A')) {
-      R.site_info.event = `QPE forecast ${fmtLocal(during.start_ms, R.tz)} to ${fmtLocal(during.end_ms, R.tz)}`;
-    }
   }
   kv.get('seen:' + site.id).then((seen) => {
     if (!cur || cur.R !== R) return;
@@ -506,7 +505,15 @@ function reclassify() {
     recent: c.recent && { start_ms: c.recent.start_ms, end_ms: c.recent.end_ms, total: c.recent.total },
   };
   if (!R.types_touched) R.types = c.types;
+  if (eventAuto(R.site_info)) R.site_info.event = eventText(R.classified, R.storm_gauge_in, R.tz, !!R.weather.forecast);
   return c;
+}
+
+// the rain event line fills itself until the inspector types over it (a report started before 10/22 counts
+// as filled-in only when it still holds the old automatic text)
+function eventAuto(si) {
+  if (typeof si.event_auto === 'boolean') return si.event_auto;
+  return !si.event || si.event === 'N/A' || si.event.startsWith('QPE forecast ');
 }
 
 function typeCard() {
@@ -521,7 +528,7 @@ function typeCard() {
   const c = R.classified || {};
   if (c.recent) {
     kids.push(field(`Site gauge total over that storm (inches, from the rain gauge log)`,
-      h('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0', value: R.storm_gauge_in, onchange: (e) => { R.storm_gauge_in = e.target.value; reclassify(); save(); repaint(['type']); } })));
+      h('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0', value: R.storm_gauge_in, onchange: (e) => { R.storm_gauge_in = e.target.value; reclassify(); save(); repaint(['type', 'site']); } })));
   }
   if (R.types.includes('pre') && R.inspector.role !== 'qsp') {
     kids.push(h('div', { class: 'banner red', style: 'margin:10px 0 0' },
@@ -670,7 +677,10 @@ function siteCard() {
     field('General weather conditions today', h('input', { type: 'text', value: si.weather_today, oninput: bind('weather_today') })),
     field('On-site rain gauge reading (inches)', h('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0', value: si.gauge_in, oninput: bind('gauge_in') }),
       false, h('p', { class: 'hint' }, 'Read the gauge on site and log it. 0.5" or more over a QPE means a post-storm inspection is owed within 96 hours after it ends.')),
-    field('Start and end of the current rain event', h('input', { type: 'text', value: si.event, oninput: bind('event') }), true),
+    field('Rain event: start, end and length of the QPE', h('textarea', { value: si.event, oninput: (e) => { si.event = e.target.value; si.event_auto = false; save(); } }), true,
+      eventAuto(si)
+        ? h('p', { class: 'hint' }, 'Filled in from the NWS forecast, the same storms the inspection type comes from. Type over it if the site saw something different.')
+        : h('button', { class: 'btn sm ghost', style: 'padding-left:0', onclick: () => { si.event_auto = true; reclassify(); save(); repaint(['site']); } }, 'Use the forecast times')),
     field('Additional comments and observations', h('textarea', { value: si.comments, oninput: bind('comments') }), true));
 }
 
@@ -889,7 +899,7 @@ function finishCard() {
     canvas,
     h('div', { style: 'height:12px' }),
     btn,
-    h('p', { class: 'hint' }, 'Signing locks the report, makes the PDF on this phone and queues it to upload. It works with no signal.'));
+    h('p', { class: 'hint' }, 'Signing locks the report and makes the PDF on this phone, with no signal needed. ' + whereItGoes(R.site) + ' It uploads by itself once there is signal.'));
   requestAnimationFrame(() => {
     const pad = new SigPad(canvas);
     cur.pad = pad;
@@ -966,7 +976,7 @@ async function renderDone(id) {
   const url = pdf ? URL.createObjectURL(pdf) : null;
   const name = rec.meta.pdf_name_final;
   const status = rec.status === 'filed'
-    ? h('div', { class: 'banner green' }, h('strong', {}, 'Filed. '), rec.filed && rec.filed.drafted ? 'The report email is waiting in Brandon\'s drafts.' : 'Brandon has it.')
+    ? h('div', { class: 'banner green' }, h('strong', {}, 'Filed. '), filedNote(rec))
     : h('div', { class: 'banner amber', id: 'up-' + id }, h('strong', {}, 'Saved on this phone. '), uploadNote[id] || 'It uploads on its own once there is signal; open the app when you have bars.');
   const kids = [
     status,
@@ -980,8 +990,28 @@ async function renderDone(id) {
         : null),
     h('button', { class: 'btn block', onclick: () => go({ name: 'home' }) }, 'Back to sites'),
   ];
-  if (rec.status !== 'filed') kids.splice(2, 0, h('button', { class: 'btn block', style: 'margin-bottom:12px', onclick: () => flush(true) }, 'Upload now'));
+  if (rec.status !== 'filed') {
+    kids.splice(1, 0,
+      h('button', { class: 'btn block', onclick: () => flush(true) }, 'Upload now'),
+      h('p', { class: 'hint', style: 'margin:6px 0 12px' }, whereItGoes(rec.data.site)));
+  }
   $app.replaceChildren(...kids);
+}
+
+// what the upload does, in words (Brandon 10/22: the Upload button didn't say what it was going to do)
+function whereItGoes(site) {
+  const folder = site.test ? 'the test folder in Brandon\'s My Drive' : site.trial ? 'the job\'s trial folder on the shared drive' : 'the job folder on the shared drive';
+  const mail = site.email_to === null || site.email_to === undefined
+    ? site.trial ? ' Trial site: no email.' : ' No email is set up for this site.'
+    : ` A report email${site.email_to ? ' to ' + site.email_to : ''} then waits in Brandon\'s Gmail drafts; nothing goes out until he sends it.`;
+  return `Uploading puts the PDF and photos in ${folder}.${mail}`;
+}
+
+function filedNote(rec) {
+  const site = rec.data.site;
+  const where = site.test ? 'In the test folder.' : 'In the job folder on the shared drive.';
+  if (!(rec.filed && rec.filed.drafted)) return where;
+  return `${where} The report email${site.email_to ? ' to ' + site.email_to : ''} is waiting in Brandon\'s drafts for him to send.`;
 }
 
 // ---------------------------------------------------------------------------------------------

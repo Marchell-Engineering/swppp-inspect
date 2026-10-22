@@ -431,6 +431,28 @@ export function whatsDue(nowMs, forecast, seen, last, tz) {
   return out;
 }
 
+// The rain event line (Att. D III.C.7.c: the estimated beginning of the QPE, its duration, the date it ends,
+// and the inches), from the same QPEs the inspection type comes from. Brandon 10/22: make the start and end
+// automatic. The inspector can still type over it.
+export function eventText(classified, stormGaugeIn, tz, hasForecast) {
+  const c = classified || {};
+  const when = (ms) => fmtLocal(ms, tz);
+  const span = (q) => {
+    const bits = [`${Math.round((q.end_ms - q.start_ms) / HOUR)} h`];
+    if (typeof q.total === 'number') bits.push(`${q.total.toFixed(2)}" forecast`);
+    return bits.join(', ');
+  };
+  if (c.during) return `QPE under way: began about ${when(c.during.start_ms)}, forecast to end about ${when(c.during.end_ms)} (${span(c.during)}).`;
+  const out = [];
+  if (c.recent) {
+    const g = stormGaugeIn === '' || stormGaugeIn === null || stormGaugeIn === undefined ? null : Number(stormGaugeIn);
+    out.push(`Last QPE began about ${when(c.recent.start_ms)} and ended about ${when(c.recent.end_ms)} (${span(c.recent)}${g === null ? '' : `; site gauge ${g.toFixed(2)}"`}).`);
+  }
+  if (c.next) out.push(`Next QPE forecast to begin about ${when(c.next.start_ms)} and end about ${when(c.next.end_ms)} (${span(c.next)}).`);
+  if (out.length) return out.join(' ');
+  return hasForecast ? 'None: no QPE under way or forecast within 120 hours, and none on record that ended in the last 96 hours.' : '';
+}
+
 // the reasons behind the worked-out type, in words, for the form and the PDF
 export function typeReasons(classified, stormGaugeIn, tz, hasForecast) {
   const c = classified || {};

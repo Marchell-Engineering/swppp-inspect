@@ -218,7 +218,7 @@ function siteInfoBlock(r) {
     ['Activities completed since the last inspection', si.completed],
     ['General weather conditions today', si.weather_today],
     ['On-site rain gauge reading', si.gauge_in === '' || si.gauge_in === undefined ? '' : inches(si.gauge_in)],
-    ['Current rain event (start and end)', si.event],
+    ['Rain event (QPE start, end and length)', si.event],
     ['Additional comments and visual monitoring observations', si.comments],
   ];
   return [
