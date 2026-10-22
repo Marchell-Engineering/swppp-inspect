@@ -3,7 +3,7 @@
 // checklist, site information, sampling, action items and the signature; then the photos and the gauge
 // history behind it.
 
-import { SECTIONS, TYPES, ANSWER_LABEL, NAL } from './checklist.js';
+import { TYPES, ANSWER_LABEL, NAL, MISSED_REASONS, shownSections, shownQuestions } from './checklist.js';
 import { fmtLocal, typeReasons } from './weather.js';
 
 const BLUE = '#24408e';
@@ -148,12 +148,12 @@ function permitBlock(r) {
   ];
 }
 
-function typeBlock(r) {
+function typeBlock(r, title = 'Type of Inspection') {
   const why = r.types_touched
     ? 'Set by the inspector.'
     : 'Worked out from the NWS forecast and the on-site gauge (Att. D III.C.2-5): ' + typeReasons(r.classified, r.storm_gauge_in, r.tz, !!(r.weather && r.weather.forecast)).join(' ');
   return [
-    bar('Type of Inspection'),
+    bar(title),
     {
       columns: TYPES.map((t) => ({
         width: '*',
@@ -182,7 +182,7 @@ function answerCells(q, a) {
 
 function checklistBlocks(r, photoNumbers) {
   const out = [];
-  for (const s of SECTIONS) {
+  for (const s of shownSections(r)) {
     out.push(bar(s.title));
     const body = [];
     if (s.id === 'general') {
@@ -193,7 +193,7 @@ function checklistBlocks(r, photoNumbers) {
         ...answerCells({ options: ['yes', 'no', 'na'], bad: 'no' }, f ? 'yes' : 'no'),
       ]);
     }
-    for (const q of s.questions) {
+    for (const q of shownQuestions(s, r)) {
       const a = r.answers[q.id];
       const text = q.label ? [{ text: q.label + ': ', bold: true }, q.text] : q.text;
       body.push([{ text, fontSize: 8.5 }, ...answerCells(q, a)]);
@@ -469,11 +469,33 @@ function signatureBlock(r, sig) {
   }];
 }
 
+// Couldn't inspect: the reason the permit allows (Att. D III.B.1) and what the inspector saw, kept for the
+// Annual Report (III.B.2)
+function missedBlock(r) {
+  const why = MISSED_REASONS.find((x) => x.id === r.missed.reason) || { label: r.missed.reason, cite: '' };
+  return [
+    bar('Why It Could Not Be Conducted'),
+    {
+      table: {
+        widths: [130, '*'],
+        body: [
+          ['Reason', `${why.label}${why.cite ? ` (Att. D ${why.cite})` : ''}`],
+          ['What happened', r.missed.explain],
+          ['Recorded', dt(r.started_ms, r.tz)],
+        ].map(([a, b]) => [{ text: a, color: MUTED }, { text: b || '--' }]),
+      },
+      layout: rows,
+    },
+    { text: 'The permit excuses an inspection for this reason; it is explained in the Annual Report (Att. D III.B.2).', fontSize: 8, color: MUTED, margin: [0, 4, 0, 0] },
+  ];
+}
+
 // report: the inspection record; logo/sig: data URLs; loadPhoto(photo) -> data URL
 export async function buildPdf(report, { logo, sig, loadPhoto }) {
   const r = report;
   const date = r.date;
-  const footerText = `${r.site.name} - CA SWPPP - ${date}`;
+  const missed = r.kind === 'missed';
+  const footerText = `${r.site.name} - ${missed ? 'Inspection Not Conducted' : 'CA SWPPP'} - ${date}`;
   const photos = await photoBlocks(r, loadPhoto);
   const dd = {
     pageSize: 'LETTER',
@@ -481,7 +503,7 @@ export async function buildPdf(report, { logo, sig, loadPhoto }) {
       || (node.headlineLevel === 2 && node.startPosition.verticalRatio > 0.66),
     pageMargins: [40, 36, 40, 44],
     defaultStyle: { fontSize: 9, color: INK, lineHeight: 1.12 },
-    info: { title: `${r.site.name} - CA SWPPP - ${date}`, author: r.inspector.name, subject: 'SWPPP inspection report', creator: 'Marchell SWPPP Inspect' },
+    info: { title: footerText, author: r.inspector.name, subject: missed ? 'SWPPP inspection not conducted' : 'SWPPP inspection report', creator: 'Marchell SWPPP Inspect' },
     footer: (page, pages) => ({
       columns: [
         { text: footerText, alignment: 'left' },
@@ -489,7 +511,17 @@ export async function buildPdf(report, { logo, sig, loadPhoto }) {
       ],
       fontSize: 7.5, color: MUTED, margin: [40, 14, 40, 0],
     }),
-    content: [
+    content: missed ? [
+      headerBlock(r, logo),
+      { text: 'SWPPP Inspection Not Conducted', alignment: 'center', bold: true, fontSize: 15, color: BLUE, margin: [0, 12, 0, 0] },
+      ...weatherBlock(r),
+      ...permitBlock(r),
+      ...typeBlock(r, 'Inspection Owed'),
+      ...missedBlock(r),
+      ...signatureBlock(r, sig),
+      ...photos.blocks,
+      ...forecastBlock(r),
+    ] : [
       headerBlock(r, logo),
       { text: 'CA SWPPP Inspection Report', alignment: 'center', bold: true, fontSize: 15, color: BLUE, margin: [0, 12, 0, 0] },
       ...weatherBlock(r),

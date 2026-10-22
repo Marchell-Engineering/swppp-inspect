@@ -4,7 +4,7 @@
 import { kv, reports, blobs, persist, uid } from './store.js';
 import { signIn, refreshConfig, flushQueue, net } from './api.js';
 import { fetchForecast, fetchGauges, lastRain, classify, whatsDue, mergeSeen, unionSeen, typeReasons, eventText, localDate, fmtLocal } from './weather.js';
-import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL } from './checklist.js';
+import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL, shownSections, shownQuestions, TYPE_SECTIONS, LEADS, MISSED_REASONS } from './checklist.js';
 import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, SigPad } from './media.js';
 import { buildPdf } from './pdf.js';
 import { APP_VERSION } from './settings.js';
@@ -194,7 +194,8 @@ async function renderHome() {
       h('ul', { class: 'due' }, due.map((d) => h('li', { class: d.urgent ? 'urgent' : '' }, d.text,
         d.qsp && cfg.inspector.role !== 'qsp' ? h('span', { class: 'sub' }, ' (a QSP does this one)') : null))),
       h('div', { class: 'chips' }, chips),
-      h('button', { class: 'btn primary block', onclick: () => startInspection(site) }, 'Start inspection')));
+      h('button', { class: 'btn primary block', onclick: () => startInspection(site) }, 'Start inspection'),
+      h('button', { class: 'btn ghost block', style: 'margin-top:6px', onclick: () => startInspection(site, 'missed') }, "Couldn't inspect")));
   }
 
   if (done.length) {
@@ -278,7 +279,7 @@ async function pullWeather(site, timeoutMs = 20000) {
 // ---------------------------------------------------------------------------------------------
 // starting an inspection
 
-async function startInspection(site) {
+async function startInspection(site, kind = 'inspection') {
   const cfg = await kv.get('config');
   const now = Date.now();
   const tz = site.tz || 'America/Los_Angeles';
@@ -286,6 +287,7 @@ async function startInspection(site) {
   const last = site.last || {};
   const R = {
     id,
+    kind,
     app_version: APP_VERSION,
     tz,
     site: {
@@ -316,6 +318,10 @@ async function startInspection(site) {
     sampling: null,
     signature: null,
   };
+  if (kind === 'missed') {
+    // Couldn't inspect (Att. D III.B.1): the reason and the story, for the Annual Report (III.B.2)
+    Object.assign(R, { answers: {}, na_from_last: [], carried: [], items: [], missed: { reason: '', explain: '' } });
+  }
   const rec = { id, site_id: site.id, status: 'draft', created_ms: now, updated_ms: now, data: R, files: [], meta: { pdf_name: site.pdf_name } };
   await reports.put(rec);
   go({ name: 'inspect', id });
@@ -365,7 +371,7 @@ function applyWeather(wx) {
     cur.seen = seen || [];
     reclassify();
     save();
-    repaint(['wx', 'type', 'general', 'site']);
+    repaint(['wx', 'type', 'general', 'site', ...TYPE_SECTIONS]);
   });
 }
 
@@ -393,8 +399,13 @@ function cards() {
     { id: 'wx', label: 'Weather', build: weatherCard, status: () => (R.weather.forecast ? 'done' : '') },
     { id: 'type', label: 'Type', build: typeCard, status: () => (R.types.length ? 'done' : 'warn') },
   ];
+  if (R.kind === 'missed') {
+    list.push({ id: 'missed', label: 'Why', build: missedCard, status: () => (R.missed.reason && R.missed.explain.trim() ? 'done' : '') });
+    list.push({ id: 'finish', label: 'Sign', build: finishCard, status: () => '' });
+    return list;
+  }
   if (R.carried.length) list.push({ id: 'carried', label: 'Open items', build: carriedCard, status: () => (R.carried.every((x) => x.status) ? 'done' : '') });
-  for (const s of SECTIONS) list.push({ id: s.id, label: s.title.replace(' BMPs', '').replace('Housekeeping & Non-Stormwater', 'Housekeeping').replace('Discharge Observations', 'Observations'), build: () => sectionCard(s), status: () => sectionStatus(s) });
+  for (const s of shownSections(R)) list.push({ id: s.id, label: s.title.replace(' BMPs', '').replace('Housekeeping & Non-Stormwater', 'Housekeeping').replace('Discharge Observations', 'Observations').replace(' Checks', ''), build: () => sectionCard(s), status: () => sectionStatus(s) });
   list.push({ id: 'site', label: 'Site info', build: siteCard, status: () => (missingSite().length ? '' : 'done') });
   if (R.answers.g_samples === 'yes') list.push({ id: 'sampling', label: 'Sampling', build: samplingCard, status: () => (R.sampling && R.sampling.readings.length ? 'done' : '') });
   list.push({ id: 'items', label: 'Action items', build: itemsCard, status: () => (R.items.every((x) => x.title && x.description) ? (R.items.length ? 'done' : '') : 'warn') });
@@ -528,9 +539,9 @@ function typeCard() {
   const c = R.classified || {};
   if (c.recent) {
     kids.push(field(`Site gauge total over that storm (inches, from the rain gauge log)`,
-      h('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0', value: R.storm_gauge_in, onchange: (e) => { R.storm_gauge_in = e.target.value; reclassify(); save(); repaint(['type', 'site']); } })));
+      h('input', { type: 'number', inputmode: 'decimal', step: '0.01', min: '0', value: R.storm_gauge_in, onchange: (e) => { R.storm_gauge_in = e.target.value; reclassify(); save(); repaint(['type', 'site', ...TYPE_SECTIONS]); } })));
   }
-  if (R.types.includes('pre') && R.inspector.role !== 'qsp') {
+  if (R.kind !== 'missed' && R.types.includes('pre') && R.inspector.role !== 'qsp') {
     kids.push(h('div', { class: 'banner red', style: 'margin:10px 0 0' },
       'The permit has a QSP do the pre-storm (QPE) inspection (Att. D III.C.3). As a delegate, check with Brandon before doing one.'));
   }
@@ -545,15 +556,15 @@ function typeCard() {
           R.types_touched = true;
           R.types = on ? R.types.filter((x) => x !== t.id) : [...R.types, t.id];
           save();
-          repaint(['type']);
+          repaint(['type', ...TYPE_SECTIONS]);
         },
       }, h('span', { class: 'box' }), t.label);
     })));
     if (R.types_touched) {
-      kids.push(h('button', { class: 'btn sm ghost', style: 'padding-left:0', onclick: () => { R.types_touched = false; reclassify(); save(); repaint(['type']); } }, 'Back to the worked-out type'));
+      kids.push(h('button', { class: 'btn sm ghost', style: 'padding-left:0', onclick: () => { R.types_touched = false; reclassify(); save(); repaint(['type', ...TYPE_SECTIONS]); } }, 'Back to the worked-out type'));
     }
   }
-  return card('type', 'Type of inspection', ...kids);
+  return card('type', R.kind === 'missed' ? "The inspection that couldn't be done" : 'Type of inspection', ...kids);
 }
 
 // --- carried action items ------------------------------------------------------------------------
@@ -593,7 +604,7 @@ function segBtn(label, on, tone, onclick) {
 function sectionStatus(s) {
   const { R } = cur;
   let all = true;
-  for (const q of s.questions) {
+  for (const q of shownQuestions(s, R)) {
     const a = R.answers[q.id];
     if (!a) all = false;
     else if (q.bad === a && !(R.notes[q.id] || '').trim()) return 'warn';
@@ -605,14 +616,16 @@ function sectionCard(s) {
   const { R } = cur;
   const rest = h('button', { class: 'btn sm ghost' }, 'Rest N/A');
   rest.addEventListener('click', () => {
-    for (const q of s.questions) if (!R.answers[q.id] && q.options.includes('na')) R.answers[q.id] = 'na';
+    for (const q of shownQuestions(s, R)) if (!R.answers[q.id] && q.options.includes('na')) R.answers[q.id] = 'na';
     save();
     repaint([s.id]);
   });
-  const hasNa = s.questions.some((q) => q.options.includes('na'));
+  const qs = shownQuestions(s, R);
+  const hasNa = qs.some((q) => q.options.includes('na'));
   return h('section', { class: 'card', id: 'card-' + s.id },
-    h('h2', {}, h('span', { class: 'grow' }, s.title), hasNa && s.questions.length > 2 ? rest : null),
-    s.questions.map((q) => questionEl(q, s)),
+    h('h2', {}, h('span', { class: 'grow' }, s.title), hasNa && qs.length > 2 ? rest : null),
+    s.when ? h('p', { class: 'hint', style: 'margin-top:0' }, s.id === 'pre' ? 'The permit\'s pre-storm checks (Att. D III.C.3), on top of the BMP sections below.' : 'The permit\'s post-storm checks (Att. D III.C.5), on top of the BMP sections below.') : null,
+    qs.map((q) => questionEl(q, s)),
     s.id === 'general' && R.site.risk_level >= 2 && R.answers.g_discharge === 'yes' && R.types.some((t) => t === 'during' || t === 'pre' || t === 'post')
       ? h('div', { class: 'banner amber', style: 'margin:10px 0 0' }, 'Discharging during a QPE: Risk Level 2 and 3 sites sample each discharge location once per 24 hours of the event (Att. D III.D.1.b). Answer Yes to samples to open the Sampling Log.')
       : null);
@@ -633,6 +646,8 @@ function questionEl(q, s) {
       if (q.id === 'g_samples' || q.id === 'g_discharge') {
         if (q.id === 'g_samples' && o === 'yes' && !R.sampling) R.sampling = newSampling();
         repaint();
+      } else if (LEADS.has(q.id)) {
+        repaint([s.id]); // a follow-up question comes or goes
       } else {
         el.replaceWith(questionEl(q, s));
         paintJump();
@@ -640,6 +655,7 @@ function questionEl(q, s) {
     }))));
   if (a && q.bad === a) {
     const linked = R.items.find((x) => x.from_q === q.id);
+    if (q.alert) el.append(h('div', { class: 'banner red', style: 'margin:10px 0 0' }, q.alert));
     el.append(h('div', { class: 'problem' },
       h('label', {}, "What's wrong? (required)"),
       h('textarea', { placeholder: 'Describe the problem and where it is', value: R.notes[q.id] || '', oninput: (e) => { R.notes[q.id] = e.target.value; save(); } }),
@@ -650,6 +666,21 @@ function questionEl(q, s) {
           : h('button', { class: 'btn sm', onclick: () => { addItem({ title: q.label || s.title, description: R.notes[q.id] || '', from_q: q.id }); el.replaceWith(questionEl(q, s)); } }, 'Make it an action item'))));
   }
   return el;
+}
+
+// --- couldn't inspect ---------------------------------------------------------------------------
+
+function missedCard() {
+  const { R } = cur;
+  const m = R.missed;
+  return card('missed', "Why it couldn't be done",
+    h('p', { class: 'hint', style: 'margin-top:0' }, 'The permit lets an inspection be skipped only for these reasons (Att. D III.B.1). Every one is explained in the Annual Report, so say what you saw.'),
+    h('div', { class: 'types' }, MISSED_REASONS.map((x) => h('button', {
+      class: m.reason === x.id ? 'on' : '',
+      onclick: () => { m.reason = x.id; save(); repaint(['missed']); },
+    }, h('span', { class: 'box' }), x.label))),
+    field('What happened', h('textarea', { value: m.explain, placeholder: 'e.g. Gate locked, no one on site; called the superintendent at 8:10, no answer', oninput: (e) => { m.explain = e.target.value; save(); } })),
+    h('div', { class: 'field' }, h('label', {}, 'Photos', h('span', { class: 'opt' }, ' (optional)')), photoWidget('missed', 'Site conditions')));
 }
 
 // --- site information ----------------------------------------------------------------------------
@@ -868,10 +899,15 @@ function missingAll() {
   const m = [];
   if (!R.types.length) m.push(['type', 'Pick the inspection type']);
   if (R.carried.some((x) => !x.status)) m.push(['carried', 'Mark each open item still open or fixed']);
-  for (const s of SECTIONS) {
-    const unanswered = s.questions.filter((q) => !R.answers[q.id]).length;
+  if (R.kind === 'missed') {
+    if (!R.missed.reason) m.push(['missed', "Pick why it couldn't be done"]);
+    if (!R.missed.explain.trim()) m.push(['missed', 'Explain what happened']);
+    return m;
+  }
+  for (const s of shownSections(R)) {
+    const unanswered = shownQuestions(s, R).filter((q) => !R.answers[q.id]).length;
     if (unanswered) m.push([s.id, `${s.title}: ${unanswered} unanswered`]);
-    const noNote = s.questions.filter((q) => R.answers[q.id] && q.bad === R.answers[q.id] && !(R.notes[q.id] || '').trim()).length;
+    const noNote = shownQuestions(s, R).filter((q) => R.answers[q.id] && q.bad === R.answers[q.id] && !(R.notes[q.id] || '').trim()).length;
     if (noNote) m.push([s.id, `${s.title}: describe ${noNote === 1 ? 'the problem' : `the ${noNote} problems`}`]);
   }
   const ms = missingSite();
@@ -899,7 +935,7 @@ function finishCard() {
     canvas,
     h('div', { style: 'height:12px' }),
     btn,
-    h('p', { class: 'hint' }, 'Signing locks the report and makes the PDF on this phone, with no signal needed. ' + whereItGoes(R.site) + ' It uploads by itself once there is signal.'));
+    h('p', { class: 'hint' }, `Signing locks the ${R.kind === 'missed' ? 'record' : 'report'} and makes the PDF on this phone, with no signal needed. ` + whereItGoes(R.site, R.kind) + ' It uploads by itself once there is signal.'));
   requestAnimationFrame(() => {
     const pad = new SigPad(canvas);
     cur.pad = pad;
@@ -940,8 +976,12 @@ async function finish(btn) {
     });
     await blobs.put(`pdf:${rec.id}`, pdf);
 
-    const same = (await reports.all()).filter((x) => x.id !== rec.id && x.site_id === rec.site_id && x.status !== 'draft' && x.data.date === R.date).length;
-    const base = (rec.meta.pdf_name || `${R.site.name}-CA SWPPP-{date}.pdf`).replace('{date}', R.date);
+    // a Couldn't-inspect record is named date first, never ending in the date, so billing doesn't count it
+    const missed = R.kind === 'missed';
+    const same = (await reports.all()).filter((x) => x.id !== rec.id && x.site_id === rec.site_id && x.status !== 'draft' && x.data.date === R.date && (x.data.kind === 'missed') === missed).length;
+    const base = missed
+      ? `${R.date} ${R.site.name} - Inspection Not Conducted.pdf`
+      : (rec.meta.pdf_name || `${R.site.name}-CA SWPPP-{date}.pdf`).replace('{date}', R.date);
     const pdfName = same ? base.replace(/\.pdf$/i, ` (${same + 1}).pdf`) : base;
     const safe = (s) => (s || 'Photo').replace(/[\\/:*?"<>|#%]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60);
     rec.files = [
@@ -981,7 +1021,7 @@ async function renderDone(id) {
   const kids = [
     status,
     h('div', { class: 'card' },
-      h('h2', {}, 'Report signed'),
+      h('h2', {}, rec.data.kind === 'missed' ? 'Record signed' : 'Report signed'),
       h('p', { class: 'sub', style: 'margin-top:0' }, `${mdy(rec.data.date)} · ${fmtLocal(rec.data.started_ms, rec.data.tz, { weekday: undefined, month: undefined, day: undefined })} to ${fmtLocal(rec.data.finished_ms, rec.data.tz, { weekday: undefined, month: undefined, day: undefined })} · ${rec.data.inspector.name}`),
       h('p', { class: 'small' }, name),
       url ? h('a', { class: 'btn primary block', href: url, target: '_blank', rel: 'noopener', download: name }, 'Open the PDF') : h('p', {}, 'The PDF is missing on this phone.'),
@@ -993,14 +1033,15 @@ async function renderDone(id) {
   if (rec.status !== 'filed') {
     kids.splice(1, 0,
       h('button', { class: 'btn block', onclick: () => flush(true) }, 'Upload now'),
-      h('p', { class: 'hint', style: 'margin:6px 0 12px' }, whereItGoes(rec.data.site)));
+      h('p', { class: 'hint', style: 'margin:6px 0 12px' }, whereItGoes(rec.data.site, rec.data.kind)));
   }
   $app.replaceChildren(...kids);
 }
 
 // what the upload does, in words (Brandon 10/22: the Upload button didn't say what it was going to do)
-function whereItGoes(site) {
+function whereItGoes(site, kind) {
   const folder = site.test ? 'the test folder in Brandon\'s My Drive' : site.trial ? 'the job\'s trial folder on the shared drive' : 'the job folder on the shared drive';
+  if (kind === 'missed') return `Uploading puts this record in ${folder}, for the Annual Report. No email goes out; Brandon sees it on his morning list.`;
   const mail = site.email_to === null || site.email_to === undefined
     ? site.trial ? ' Trial site: no email.' : ' No email is set up for this site.'
     : ` A report email${site.email_to ? ' to ' + site.email_to : ''} then waits in Brandon\'s Gmail drafts; nothing goes out until he sends it.`;
@@ -1010,6 +1051,7 @@ function whereItGoes(site) {
 function filedNote(rec) {
   const site = rec.data.site;
   const where = site.test ? 'In the test folder.' : 'In the job folder on the shared drive.';
+  if (rec.data.kind === 'missed') return `${where} Kept for the Annual Report; no email.`;
   if (!(rec.filed && rec.filed.drafted)) return where;
   return `${where} The report email${site.email_to ? ' to ' + site.email_to : ''} is waiting in Brandon\'s drafts for him to send.`;
 }
