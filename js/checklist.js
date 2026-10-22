@@ -11,7 +11,8 @@
 //   - During- and post-storm inspections ask whether the gauge was emptied after its reading (Brandon, 10/22).
 //     The permit wants a reading every inspection (III.C.7.c; CASQA FAQ Visual Inspections Q8) and the QPE's
 //     total for the post-storm trigger (III.C.5); read, record with the time, then empty, so each reading is
-//     the rain since the last visit and a storm's readings add up to its total.
+//     the rain since the last visit and a storm's readings add up to its total. A No is a plain record, like
+//     the samples question: no red, no "what's wrong," no action item (Brandon, 10/22).
 // Questions that changed meaning got new ids, so an old report's answers never read under the new wording.
 //
 // ComplianceGo's "Has the NOAA forecast been checked?" is gone: the app pulls the NWS forecast itself and
@@ -45,7 +46,7 @@ export const SECTIONS = [
     title: 'General',
     questions: [
       { id: 'g_gauge_log', text: 'Is the on-site rain gauge log up to date?', options: YN, bad: 'no' },
-      { id: 'g_gauge_emptied', text: 'Was the rain gauge emptied after its reading was recorded?', options: YN, bad: 'no', when: ['during', 'post'] },
+      { id: 'g_gauge_emptied', text: 'Was the rain gauge emptied after its reading was recorded?', options: YN, when: ['during', 'post'] },
       { id: 'g_swppp', text: 'Is the SWPPP on-site and up to date?', options: YN, bad: 'no' },
       { id: 'g_swppp_match', text: 'Does the SWPPP still match the site, with no amendment needed (BMPs, layout, phase of work)?', options: YN, bad: 'no' },
       { id: 'g_samples', text: 'Were any stormwater samples collected during the inspection? If yes, report results in the Sampling Log.', options: YN },
