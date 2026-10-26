@@ -271,7 +271,7 @@ async function pullWeather(site, timeoutMs = 20000) {
   await kv.set('wx:' + site.id, wx);
   if (forecast) {
     // remember every QPE seen forecast, for the post-QPE call after it drops off the forecast
-    await kv.set('seen:' + site.id, mergeSeen(await kv.get('seen:' + site.id), forecast.fetched_ms, forecast.qpes));
+    await kv.set('seen:' + site.id, mergeSeen(await kv.get('seen:' + site.id), forecast.fetched_ms, forecast.qpes, forecast.bins));
   }
   return { ...wx, fresh: !!forecast };
 }

@@ -352,26 +352,88 @@ export function lastRain(gauges) {
 // called after the storm has dropped off the forecast. A future QPE a newer forecast no longer shows is
 // dropped (the forecast changed); one that had begun stays as history. The Google script keeps the same
 // list for all phones (mergeSeen there mirrors this one).
+//
+// How a storm's start and end are set follows swppp-weather's forecast_qpes (fixed 10/26/2026, Brandon:
+// "Fix both"; the 10/21-10/23 storm here had been cut off Wed night at Surf Thru and Thu 11:07 AM at VLC):
+//   - before it begins, the newest forecast moves it, but only a start still ahead when the forecast was
+//     pulled sets the start; a QPE shown already under way confirms the storm without moving its start;
+//   - once it has begun it runs in 24-hour periods from its start (Att. B; Att. D III.C.4): each next period
+//     counts when the last forecast pulled before it began had 0.25 in or more for it (next_total); a
+//     forecast pulled while it runs can carry it further, and a forecast that no longer shows it doesn't
+//     cut it short.
+// Extra fields on a storm: p_end_ms (the end of its last counted period), next_total (the forecast inches
+// for the period starting at p_end_ms), run_q_end_ms (the furthest end a forecast pulled during it showed),
+// pre_end_ms (the end the forecasts gave it before it began: used only when no 6-hour amounts were seen).
 
 const overlaps = (a, b) => a.start_ms < b.end_ms && b.start_ms < a.end_ms;
+const DAY = 24 * HOUR;
 
-export function mergeSeen(seen, fetchedMs, qpes) {
-  let out = (seen || []).map((s) => ({ ...s }));
-  out = out.filter((s) => s.start_ms <= fetchedMs || qpes.some((q) => overlaps(q, s)));
-  for (const s of out) {
-    // begun, still shown as running, but this forecast has no QPE there any more: it ended
-    if (s.start_ms <= fetchedMs && s.end_ms > fetchedMs && !qpes.some((q) => overlaps(q, s))) s.end_ms = fetchedMs;
+// the forecast inches for the 24 hours from fromMs, from a forecast's 6-hour bins; null if it doesn't reach
+function periodTotal(bins, fromMs) {
+  let sum = 0;
+  for (let j = 0; j < 4; j++) {
+    const b = (bins || []).find((x) => x.start === fromMs + j * BIN_HOURS * HOUR);
+    if (!b || b.qpf === null || b.qpf === undefined) return null;
+    sum += b.qpf;
   }
+  return round2(sum);
+}
+
+// a storm as of a time: periods the forecast before them carried are counted, and a begun storm's end is
+// its periods plus what forecasts pulled during it showed
+export function settle(s, nowMs) {
+  const out = { ...s };
+  if (out.p_end_ms === undefined) {   // a storm saved before 10/26: keep the end it had as a floor
+    out.p_end_ms = out.start_ms + DAY;
+    out.pre_end_ms = out.end_ms;
+    if (out.start_ms <= nowMs) out.run_q_end_ms = Math.max(out.run_q_end_ms || 0, out.end_ms);
+  }
+  while (out.p_end_ms <= nowMs && typeof out.next_total === 'number' && out.next_total >= QPE_EXTEND) {
+    out.p_end_ms += DAY;
+    out.next_total = null;
+  }
+  if (out.start_ms <= nowMs) {
+    out.end_ms = Math.max(out.p_end_ms, out.run_q_end_ms || 0, out.next_total === undefined ? out.pre_end_ms || 0 : 0);
+  }
+  return out;
+}
+
+export function mergeSeen(seen, fetchedMs, qpes, bins) {
+  let out = (seen || []).map((s) => settle(s, fetchedMs));
+  // still ahead, but this forecast no longer shows it: dropped (the forecast changed)
+  out = out.filter((s) => s.start_ms <= fetchedMs || qpes.some((q) => overlaps(q, s)));
   for (const q of qpes) {
     const same = out.find((s) => overlaps(s, q));
-    if (same) {
-      if (same.start_ms > fetchedMs || q.start_ms < same.start_ms) same.start_ms = q.start_ms;
-      same.end_ms = q.end_ms;
-      same.total = q.total;
-      same.seen_ms = fetchedMs;
-    } else {
-      out.push({ start_ms: q.start_ms, end_ms: q.end_ms, total: q.total, seen_ms: fetchedMs });
+    if (!same) {
+      const s = { start_ms: q.start_ms, end_ms: q.end_ms, p_end_ms: q.start_ms + DAY, total: q.total, seen_ms: fetchedMs };
+      if (q.start_ms <= fetchedMs) s.run_q_end_ms = q.end_ms;   // first seen under way
+      out.push(s);
+      continue;
     }
+    if (same.start_ms > fetchedMs) {   // not begun: the newest forecast governs
+      if (q.start_ms > fetchedMs) {
+        same.start_ms = q.start_ms;
+        same.end_ms = q.end_ms;
+        same.p_end_ms = q.start_ms + DAY;
+      } else {
+        same.end_ms = Math.max(same.end_ms, q.end_ms);   // shown under way: confirms it, the start stays
+      }
+    } else {
+      same.run_q_end_ms = Math.max(same.run_q_end_ms || 0, q.end_ms);   // pulled while it runs: can carry it on
+    }
+    same.total = q.total;
+    same.seen_ms = fetchedMs;
+  }
+  for (const s of out) {
+    if (fetchedMs < s.p_end_ms) {
+      const t = periodTotal(bins, s.p_end_ms);
+      if (t !== null) {
+        s.next_total = t;
+        s.seen_ms = fetchedMs;
+      }
+    }
+    if (s.start_ms > fetchedMs) s.pre_end_ms = s.end_ms;
+    else Object.assign(s, settle(s, fetchedMs));
   }
   return out.filter((s) => fetchedMs - s.end_ms < 14 * 24 * HOUR).sort((a, b) => a.start_ms - b.start_ms);
 }
@@ -395,7 +457,7 @@ export function unionSeen(a, b) {
 // Any of them also counts as the weekly.
 
 export function classify(nowMs, forecast, seen, stormGaugeIn) {
-  const qpes = unionSeen(seen, forecast ? forecast.qpes : []);
+  const qpes = unionSeen((seen || []).map((s) => settle(s, nowMs)), forecast ? forecast.qpes : []);
   const during = qpes.find((q) => q.start_ms <= nowMs && nowMs < q.end_ms) || null;
   const next = qpes.find((q) => q.start_ms > nowMs && q.start_ms - nowMs <= 120 * HOUR) || null;
   const recent = qpes.filter((q) => q.end_ms <= nowMs && nowMs - q.end_ms <= 96 * HOUR).pop() || null;
