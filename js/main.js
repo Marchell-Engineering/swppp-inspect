@@ -2,7 +2,7 @@
 // Everything is saved on the phone as it is typed; nothing needs signal until the upload.
 
 import { kv, reports, blobs, persist, uid } from './store.js';
-import { signIn, refreshConfig, flushQueue, net } from './api.js';
+import { signIn, refreshConfig, flushQueue, net, act, rememberBackend } from './api.js';
 import { fetchForecast, fetchGauges, lastRain, classify, whatsDue, mergeSeen, unionSeen, typeReasons, eventText, localDate, fmtLocal } from './weather.js';
 import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL, shownSections, shownQuestions, TYPE_SECTIONS, LEADS, MISSED_REASONS } from './checklist.js';
 import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, SigPad } from './media.js';
@@ -165,7 +165,7 @@ async function renderHome() {
         });
         return h('li', {},
           h('div', { class: 'grow' }, h('div', { style: 'font-weight:650' }, r.data.site.name),
-            h('div', { class: 'sub' }, `Started ${fmtLocal(r.data.started_ms, r.data.tz)}`)),
+            h('div', { class: 'sub' }, r.data.revises ? `Correction of the ${mdy(r.data.date)} report` : `Started ${fmtLocal(r.data.started_ms, r.data.tz)}`)),
           del,
           h('button', { class: 'btn sm primary', onclick: () => go({ name: 'inspect', id: r.id }) }, 'Resume'));
       }))));
@@ -198,12 +198,15 @@ async function renderHome() {
       h('button', { class: 'btn ghost block', style: 'margin-top:6px', onclick: () => startInspection(site, 'missed') }, "Couldn't inspect")));
   }
 
+  const alerts = await alertsCard(cfg);
+  if (alerts) out.push(alerts);
+
   if (done.length) {
     out.push(h('div', { class: 'card' }, h('h2', {}, 'Reports on this phone'),
       h('ul', { class: 'list' }, done.map((r) => h('li', {},
         h('div', { class: 'grow' }, h('div', { style: 'font-weight:650' }, `${r.data.site.name}`),
-          h('div', { class: 'sub' }, `${mdy(r.data.date)} · ${r.data.types.map((t) => TYPES.find((x) => x.id === t).label).join(', ')}`)),
-        h('span', { class: 'chip ' + (r.status === 'filed' ? 'green' : 'amber') }, r.status === 'filed' ? 'Filed' : 'Waiting'),
+          h('div', { class: 'sub' }, `${mdy(r.data.date)} · ${r.data.types.map((t) => TYPES.find((x) => x.id === t).label).join(', ')}${r.data.revision ? ` · Rev ${r.data.revision}` : ''}`)),
+        superseded(r, all) ? h('span', { class: 'chip' }, 'Corrected') : h('span', { class: 'chip ' + (r.status === 'filed' ? 'green' : 'amber') }, r.status === 'filed' ? 'Filed' : 'Waiting'),
         h('button', { class: 'btn sm', onclick: () => go({ name: 'done', id: r.id }) }, 'Open'))))));
   }
 
@@ -215,6 +218,7 @@ async function renderHome() {
       signOut.textContent = 'Tap again to sign out';
       return;
     }
+    await alertsOff().catch(() => {});
     await kv.del('code');
     await kv.del('config');
     go({ name: 'signin' }, true);
@@ -385,17 +389,19 @@ async function renderInspect(id) {
   const cfg = await kv.get('config');
   const site = cfg.sites.find((s) => s.id === rec.site_id) || rec.data.site;
   cur = { rec, R: rec.data, site, pad: null };
-  $title.textContent = rec.data.site.name;
+  $title.textContent = (rec.data.revises ? 'Correction: ' : '') + rec.data.site.name;
   $back.hidden = false;
   $app.replaceChildren(...cards().map((c) => c.build()));
   paintJump();
-  if (!rec.data.weather.forecast || Date.now() - rec.data.started_ms < 5 * 60e3) loadWeather(false);
+  // a correction keeps the weather the inspection had; today's forecast would be wrong for it
+  if (!rec.data.revises && (!rec.data.weather.forecast || Date.now() - rec.data.started_ms < 5 * 60e3)) loadWeather(false);
 }
 
 // each card: id, jump label, build(), status() -> 'done' | 'warn' | ''
 function cards() {
   const { R } = cur;
   const list = [
+    ...(R.revises ? [{ id: 'fix', label: 'Correction', build: correctionCard, status: () => (R.revision_reason.trim() ? 'done' : 'warn') }] : []),
     { id: 'wx', label: 'Weather', build: weatherCard, status: () => (R.weather.forecast ? 'done' : '') },
     { id: 'type', label: 'Type', build: typeCard, status: () => (R.types.length ? 'done' : 'warn') },
   ];
@@ -494,7 +500,7 @@ function weatherCard() {
       h('div', { class: d.pop >= 50 && d.qpf >= 0.25 ? 'wet' : '' }, mdy(d.date).slice(0, -3), h('br'), `${d.pop}%`, h('br'), `${d.qpf.toFixed(2)}"`))));
   }
   kids.push(h('p', { class: 'hint', id: 'wx-note' }, w.note || `NWS forecast pulled ${fmtLocal(f.fetched_ms, tz)}.`));
-  kids.push(h('button', { class: 'btn sm', onclick: () => loadWeather(true) }, f ? 'Refresh' : 'Try again'));
+  if (!R.revises) kids.push(h('button', { class: 'btn sm', onclick: () => loadWeather(true) }, f ? 'Refresh' : 'Try again'));
   return card('wx', 'Weather', ...kids);
 }
 
@@ -508,6 +514,7 @@ function cell(k, v) {
 // confirms, or opens the toggles to change it.
 function reclassify() {
   const { R } = cur;
+  if (R.revises) return R.classified; // a correction: the type is whatever the inspector sets
   const c = classify(R.started_ms, R.weather.forecast, cur.seen || [], R.storm_gauge_in);
   R.classified = {
     types: c.types,
@@ -560,7 +567,7 @@ function typeCard() {
         },
       }, h('span', { class: 'box' }), t.label);
     })));
-    if (R.types_touched) {
+    if (R.types_touched && !R.revises) {
       kids.push(h('button', { class: 'btn sm ghost', style: 'padding-left:0', onclick: () => { R.types_touched = false; reclassify(); save(); repaint(['type', ...TYPE_SECTIONS]); } }, 'Back to the worked-out type'));
     }
   }
@@ -586,9 +593,12 @@ function carriedCard() {
           h('strong', {}, `${x.reported.by} marked this fixed ${shortDate(x.reported.at, R.tz)}`),
           x.reported.note ? `: "${x.reported.note}"` : '', x.reported.photo ? ' (photo in the job folder)' : '',
           '. Check it, and mark it Fixed only if it is.') : null,
-        h('div', { class: 'seg', style: 'margin-top:10px' },
-          segBtn('Still open', x.status === 'open', '', () => { x.status = 'open'; x.closed_on = ''; save(); repaint(['carried']); }),
-          segBtn('Fixed', x.status === 'closed', 'good', () => { x.status = 'closed'; x.closed_on = x.closed_on || today; save(); repaint(['carried']); })));
+        R.revises
+          ? h('div', { style: 'margin-top:10px' }, h('span', { class: 'chip ' + (x.status === 'closed' ? 'green' : '') }, x.status === 'closed' ? 'Fixed' : 'Still open'),
+            h('span', { class: 'sub' }, ' (a correction can\'t change this)'))
+          : h('div', { class: 'seg', style: 'margin-top:10px' },
+            segBtn('Still open', x.status === 'open', '', () => { x.status = 'open'; x.closed_on = ''; save(); repaint(['carried']); }),
+            segBtn('Fixed', x.status === 'closed', 'good', () => { x.status = 'closed'; x.closed_on = x.closed_on || today; save(); repaint(['carried']); })));
       if (x.status === 'closed') {
         box.append(
           field('Date fixed', h('input', { type: 'date', value: x.closed_on, max: today, oninput: (e) => { x.closed_on = e.target.value; save(); } })),
@@ -668,6 +678,7 @@ function questionEl(q, s) {
       h('div', { class: 'row', style: 'margin-top:8px' },
         linked
           ? h('span', { class: 'chip blue' }, 'Action item added')
+          : R.revises ? h('span', { class: 'sub' }, 'New action items go on the next inspection, not a correction.')
           : h('button', { class: 'btn sm', onclick: () => { addItem({ title: q.label || s.title, description: R.notes[q.id] || '', from_q: q.id }); el.replaceWith(questionEl(q, s)); } }, 'Make it an action item'))));
   }
   return el;
@@ -817,7 +828,8 @@ function addItem(seed = {}) {
 function itemsCard() {
   const { R } = cur;
   return card('items', 'New action items',
-    R.items.length ? null : h('p', { class: 'hint', style: 'margin-top:0' }, 'Anything the contractor needs to fix. Each one carries forward until someone marks it fixed.'),
+    R.revises ? h('p', { class: 'hint', style: 'margin-top:0' }, R.items.length ? 'A correction can reword these, but not add or remove one.' : 'None on this report. New action items go on the next inspection.')
+      : R.items.length ? null : h('p', { class: 'hint', style: 'margin-top:0' }, 'Anything the contractor needs to fix. Each one carries forward until someone marks it fixed.'),
     R.items.map((x, i) => h('div', { class: 'item' },
       field('Item', h('input', { type: 'text', value: x.title, placeholder: 'e.g. Silt fence', oninput: (e) => { x.title = e.target.value; save(); } })),
       field("What's wrong and what to do", h('textarea', { value: x.description, oninput: (e) => { x.description = e.target.value; save(); } })),
@@ -832,8 +844,8 @@ function itemsCard() {
       photoWidget('item:' + x.id, x.title || 'Action item'),
       h('div', { class: 'row', style: 'margin-top:8px' },
         h('span', { class: 'sub grow' }, x.gps ? `GPS ${x.gps.lat.toFixed(5)}, ${x.gps.lon.toFixed(5)}` : 'No GPS fix yet'),
-        h('button', { class: 'btn sm ghost danger', onclick: () => { R.items.splice(i, 1); save(); repaint(['items']); } }, 'Remove')))),
-    h('button', { class: 'btn block', onclick: () => addItem() }, '+ Add an action item'));
+        R.revises ? null : h('button', { class: 'btn sm ghost danger', onclick: () => { R.items.splice(i, 1); save(); repaint(['items']); } }, 'Remove')))),
+    R.revises ? null : h('button', { class: 'btn block', onclick: () => addItem() }, '+ Add an action item'));
 }
 
 // --- photos --------------------------------------------------------------------------------------
@@ -902,6 +914,7 @@ function photosCard() {
 function missingAll() {
   const { R } = cur;
   const m = [];
+  if (R.revises && !R.revision_reason.trim()) m.push(['fix', 'Say what the correction changes and why']);
   if (!R.types.length) m.push(['type', 'Pick the inspection type']);
   if (R.carried.some((x) => !x.status)) m.push(['carried', 'Mark each open item still open or fixed']);
   if (R.kind === 'missed') {
@@ -940,7 +953,9 @@ function finishCard() {
     canvas,
     h('div', { style: 'height:12px' }),
     btn,
-    h('p', { class: 'hint' }, `Signing locks the ${R.kind === 'missed' ? 'record' : 'report'} and makes the PDF on this phone, with no signal needed. ` + whereItGoes(R.site, R.kind) + ' It uploads by itself once there is signal.'));
+    h('p', { class: 'hint' }, R.revises
+      ? `Signing makes the corrected PDF (Revision ${R.revision}) on this phone. Once uploaded it takes the original's place in the job folder, and the original is kept beside its photos, marked superseded. It uploads by itself once there is signal.`
+      : `Signing locks the ${R.kind === 'missed' ? 'record' : 'report'} and makes the PDF on this phone, with no signal needed. ` + whereItGoes(R.site, R.kind) + ' It uploads by itself once there is signal.'));
   requestAnimationFrame(() => {
     const pad = new SigPad(canvas);
     cur.pad = pad;
@@ -983,11 +998,12 @@ async function finish(btn) {
 
     // a Couldn't-inspect record is named date first, never ending in the date, so billing doesn't count it
     const missed = R.kind === 'missed';
-    const same = (await reports.all()).filter((x) => x.id !== rec.id && x.site_id === rec.site_id && x.status !== 'draft' && x.data.date === R.date && (x.data.kind === 'missed') === missed).length;
+    const same = (await reports.all()).filter((x) => x.id !== rec.id && x.site_id === rec.site_id && x.status !== 'draft' && !x.data.revises && x.data.date === R.date && (x.data.kind === 'missed') === missed).length;
     const base = missed
       ? `${R.date} ${R.site.name} - Inspection Not Conducted.pdf`
       : (rec.meta.pdf_name || `${R.site.name}-CA SWPPP-{date}.pdf`).replace('{date}', R.date);
-    const pdfName = same ? base.replace(/\.pdf$/i, ` (${same + 1}).pdf`) : base;
+    // a correction keeps the name of the report it replaces, so billing counts the inspection once
+    const pdfName = R.revises ? rec.meta.pdf_name_final : same ? base.replace(/\.pdf$/i, ` (${same + 1}).pdf`) : base;
     const safe = (s) => (s || 'Photo').replace(/[\\/:*?"<>|#%]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60);
     rec.files = [
       ...R.photos.map((p, i) => ({ key: `photo:${rec.id}:${p.id}`, name: `Photo ${String(i + 1).padStart(2, '0')} - ${safe(p.caption)}.jpg`, kind: 'photo', mime: 'image/jpeg' })),
@@ -1035,12 +1051,151 @@ async function renderDone(id) {
         : null),
     h('button', { class: 'btn block', onclick: () => go({ name: 'home' }) }, 'Back to sites'),
   ];
+  const all = await reports.all();
+  if (rec.status === 'filed') {
+    const newer = superseded(rec, all);
+    kids.splice(kids.length - 1, 0, newer
+      ? h('p', { class: 'hint', style: 'margin:0 0 12px' }, `Corrected since: Revision ${newer.data.revision}${newer.status === 'filed' ? '' : ' (still uploading)'}.`)
+      : h('button', { class: 'btn ghost block', style: 'margin-bottom:8px', onclick: () => startCorrection(rec) }, 'Correct this report'));
+  }
   if (rec.status !== 'filed') {
     kids.splice(1, 0,
       h('button', { class: 'btn block', onclick: () => flush(true) }, 'Upload now'),
       h('p', { class: 'hint', style: 'margin:6px 0 12px' }, whereItGoes(rec.data.site, rec.data.kind)));
   }
   $app.replaceChildren(...kids);
+}
+
+// ---------------------------------------------------------------------------------------------
+// phone alerts (Brandon, 10/26): each person turns them on for their own phone; the Google script's hourly
+// watch then alerts each thing that comes due once (Code.gs, "Phone alerts"). Nothing is emailed or texted.
+
+const ALERTS_ABOUT = 'a heads-up when a weekly is due, and when a storm is coming, under way or over, between 7 AM and 9 PM.';
+
+async function alertsCard(cfg) {
+  if (!cfg.push_key) return null;
+  const can = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const st = (await kv.get('alerts')) || {};
+  const msg = h('p', { class: 'hint', style: 'margin:8px 0 0' });
+  const say = (t) => { msg.textContent = t; };
+  const button = (label, cls, fn) => {
+    const b = h('button', { class: 'btn sm ' + cls }, label);
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try { await fn(); } catch (e) { say(navigator.onLine ? `That didn't work: ${e.message}` : 'That needs signal. Try again once you have some.'); }
+      b.disabled = false;
+    });
+    return b;
+  };
+  const kids = [h('h2', {}, 'Phone alerts')];
+  if (!can) {
+    kids.push(h('p', { class: 'hint', style: 'margin-top:0' }, /iPhone|iPad/.test(navigator.userAgent)
+      ? 'On an iPhone, alerts work once the app is on your Home Screen: tap Share, then "Add to Home Screen", and open the app from there.'
+      : "This phone's browser can't show alerts from the app."));
+  } else if (Notification.permission === 'denied') {
+    kids.push(h('p', { class: 'hint', style: 'margin-top:0' }, "Alerts are blocked for this app in the phone's settings. Allow its notifications there, then come back here."));
+  } else if (st.on) {
+    kids.push(h('p', { class: 'hint', style: 'margin-top:0' }, 'On for this phone: ' + ALERTS_ABOUT),
+      h('div', { class: 'row' },
+        button('Send a test', '', async () => { await act('push_test', { endpoint: st.endpoint }); say('Sent. It should show on this phone in a few seconds.'); }),
+        button('Turn off', 'ghost', async () => { await alertsOff(); renderHome(); })));
+  } else {
+    kids.push(h('p', { class: 'hint', style: 'margin-top:0' }, 'Get ' + ALERTS_ABOUT + ' Nothing is emailed or texted.'),
+      button('Turn on alerts', 'primary', async () => {
+        if (await alertsOn(cfg, say)) renderHome();
+      }));
+  }
+  kids.push(msg);
+  return h('div', { class: 'card', id: 'card-alerts' }, kids);
+}
+
+function keyBytes(b64u) {
+  const s = atob(b64u.replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(s, (c) => c.charCodeAt(0));
+}
+
+async function alertsOn(cfg, say) {
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') {
+    say("Alerts weren't allowed. You can allow them in the phone's settings for this app.");
+    return false;
+  }
+  const reg = await navigator.serviceWorker.ready;
+  const key = keyBytes(cfg.push_key);
+  let sub = await reg.pushManager.getSubscription();
+  // set up under an older key (one made again on the laptop): start over
+  const had = sub && sub.options && sub.options.applicationServerKey && new Uint8Array(sub.options.applicationServerKey);
+  if (sub && had && !(had.length === key.length && had.every((b, i) => b === key[i]))) {
+    await sub.unsubscribe();
+    sub = null;
+  }
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+  await act('push_on', { sub: sub.toJSON(), label: navigator.userAgent.slice(0, 80) });
+  await kv.set('alerts', { on: true, endpoint: sub.endpoint });
+  return true;
+}
+
+async function alertsOff() {
+  const st = (await kv.get('alerts')) || {};
+  await kv.set('alerts', { on: false });
+  if ('serviceWorker' in navigator) {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = reg.pushManager && await reg.pushManager.getSubscription();
+    if (sub) await sub.unsubscribe().catch(() => {});
+  }
+  if (st.endpoint) await act('push_off', { endpoint: st.endpoint });
+}
+
+// ---------------------------------------------------------------------------------------------
+// correcting a signed report (Brandon, 10/26). A correction is a copy of the report's latest version that
+// the inspector fixes and signs again, saying what changed. It keeps the inspection's date, weather and
+// photos, and the original's file name; action items can be reworded but not added, dropped or closed.
+
+// the newer version of this report on the phone, if it has been corrected
+function superseded(rec, all) {
+  const root = rec.data.revises || rec.data.id;
+  const n = rec.data.revision || 0;
+  return all.filter((r) => r.data.revises === root && (r.data.revision || 0) > n && r.status !== 'draft')
+    .sort((a, b) => b.data.revision - a.data.revision)[0] || null;
+}
+
+async function startCorrection(orig) {
+  const root = orig.data.revises || orig.data.id;
+  const line = (await reports.all()).filter((r) => (r.data.revises || r.data.id) === root);
+  const open = line.find((r) => r.status === 'draft');
+  if (open) return go({ name: 'inspect', id: open.id });
+  if (line.some((r) => r.status === 'signed')) return toast('The last correction is still uploading. Correct it again once it has.');
+  const latest = line.sort((a, b) => (a.data.revision || 0) - (b.data.revision || 0)).pop();
+  const id = uid();
+  const R = JSON.parse(JSON.stringify(latest.data));
+  Object.assign(R, {
+    id, revises: root, revision: (latest.data.revision || 0) + 1, revision_reason: '',
+    supersedes: { id: latest.data.id, revision: latest.data.revision || 0, signed_ms: latest.data.signature ? latest.data.signature.signed_ms : null },
+    signature: null, finished_ms: null, app_version: APP_VERSION,
+  });
+  // the photos come along; one missing on this phone is left out
+  const photos = [];
+  for (const p of R.photos) {
+    const b = await blobs.get(`photo:${latest.id}:${p.id}`);
+    if (!b) continue;
+    await blobs.put(`photo:${id}:${p.id}`, b);
+    photos.push(p);
+  }
+  R.photos = photos;
+  const now = Date.now();
+  await reports.put({ id, site_id: latest.site_id, status: 'draft', created_ms: now, updated_ms: now, data: R, files: [],
+    meta: { pdf_name: latest.meta.pdf_name, pdf_name_final: latest.meta.pdf_name_final } });
+  go({ name: 'inspect', id });
+}
+
+function correctionCard() {
+  const { R } = cur;
+  const signed = R.supersedes && R.supersedes.signed_ms ? ` (signed ${fmtLocal(R.supersedes.signed_ms, R.tz)})` : '';
+  return card('fix', `Correcting the ${mdy(R.date)} ${R.kind === 'missed' ? 'record' : 'report'}`,
+    h('p', { class: 'hint', style: 'margin-top:0' }, `Revision ${R.revision} of the report${signed}. Change what was wrong, say what changed, and sign again. `
+      + 'The corrected report replaces the original under the same name; the original is kept, marked superseded. '
+      + 'Open items can\'t be added, dropped or marked fixed in a correction; the next inspection does that.'),
+    field('What changed, and why', h('textarea', { value: R.revision_reason, placeholder: 'e.g. Rain gauge reading was 0.30", not 3.0"', oninput: (e) => { R.revision_reason = e.target.value; save(); } })));
 }
 
 // what the upload does, in words (Brandon 10/22: the Upload button didn't say what it was going to do)
@@ -1058,6 +1213,10 @@ function filedNote(rec) {
   const where = site.test ? 'In the test folder.' : 'In the job folder on the shared drive.';
   if (rec.data.kind === 'missed') return `${where} Kept for the Annual Report; no email.`;
   if (!(rec.filed && rec.filed.drafted)) return where;
+  const em = rec.filed.email;
+  if (em === 'updated') return `${where} The report email still waiting in Brandon's drafts now carries the corrected PDF.`;
+  if (em === 'second') return `${where} Brandon had edited the first report email, so the corrected one is a second draft beside it; he sends just one.`;
+  if (em === 'corrected') return `${where} A short note with the corrected copy is waiting in Brandon's drafts.`;
   return `${where} The report email${site.email_to ? ' to ' + site.email_to : ''} is waiting in Brandon\'s drafts for him to send.`;
 }
 
@@ -1137,6 +1296,7 @@ async function boot() {
 
   const params = new URLSearchParams(location.search);
   if (LOCAL && params.get('backend')) await kv.set('backend_override', params.get('backend'));
+  await rememberBackend();
 
   const cfg = await kv.get('config');
   if (!cfg) {

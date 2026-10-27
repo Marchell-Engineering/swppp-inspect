@@ -76,6 +76,18 @@ export async function refreshConfig(seen) {
   }
 }
 
+// Any other request made with this phone's code (phone alerts: push_on, push_off, push_test).
+export async function act(action, extra = {}) {
+  const code = await kv.get('code');
+  return call({ action, code, ...extra }, 30000);
+}
+
+// The offline layer (sw.js) asks the script for alert words when a push wakes the phone; it can't read
+// settings.js, so the address is kept where it can.
+export async function rememberBackend() {
+  try { await kv.set('backend_url', await backend()); } catch (e) { /* storage blocked: alerts show a plain note */ }
+}
+
 // ---------------------------------------------------------------------------------------------
 // the upload queue
 
@@ -130,7 +142,7 @@ async function uploadOne(r, code, say) {
   say('Filing the report');
   const out = await call({ action: 'finish', code, report_id: r.id }, 120000);
   r.status = 'filed';
-  r.filed = { at: Date.now(), pdf_url: out.pdf_url || null, folder_url: out.folder_url || null, drafted: !!out.drafted };
+  r.filed = { at: Date.now(), pdf_url: out.pdf_url || null, folder_url: out.folder_url || null, drafted: !!out.drafted, email: out.email || null };
   await reports.put(r);
   say('Filed');
   return out;

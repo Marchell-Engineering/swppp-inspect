@@ -491,12 +491,33 @@ function missedBlock(r) {
   ];
 }
 
+// A corrected report (Brandon, 10/26): what changed and why, and which signed version it replaces
+function correctionBlock(r) {
+  if (!r.revision) return [];
+  const was = r.supersedes && r.supersedes.signed_ms ? dt(r.supersedes.signed_ms, r.tz) : '--';
+  return [
+    bar('Correction'),
+    {
+      table: {
+        widths: [130, '*'],
+        body: [
+          ['Revision', String(r.revision)],
+          ['What changed, and why', r.revision_reason],
+          ['Replaces', `The ${r.supersedes && r.supersedes.revision ? `Revision ${r.supersedes.revision}` : 'original report'} signed ${was}, kept on file marked superseded`],
+        ].map(([a, b]) => [{ text: a, color: MUTED }, { text: b || '--' }]),
+      },
+      layout: rows,
+    },
+  ];
+}
+
 // report: the inspection record; logo/sig: data URLs; loadPhoto(photo) -> data URL
 export async function buildPdf(report, { logo, sig, loadPhoto }) {
   const r = report;
   const date = r.date;
   const missed = r.kind === 'missed';
-  const footerText = `${r.site.name} - ${missed ? 'Inspection Not Conducted' : 'CA SWPPP'} - ${date}`;
+  const rev = r.revision ? ` (Revision ${r.revision})` : '';
+  const footerText = `${r.site.name} - ${missed ? 'Inspection Not Conducted' : 'CA SWPPP'} - ${date}${r.revision ? ` - Rev ${r.revision}` : ''}`;
   const photos = await photoBlocks(r, loadPhoto);
   const dd = {
     pageSize: 'LETTER',
@@ -514,17 +535,18 @@ export async function buildPdf(report, { logo, sig, loadPhoto }) {
     }),
     content: missed ? [
       headerBlock(r, logo),
-      { text: 'SWPPP Inspection Not Conducted', alignment: 'center', bold: true, fontSize: 15, color: BLUE, margin: [0, 12, 0, 0] },
+      { text: 'SWPPP Inspection Not Conducted' + rev, alignment: 'center', bold: true, fontSize: 15, color: BLUE, margin: [0, 12, 0, 0] },
       ...weatherBlock(r),
       ...permitBlock(r),
       ...typeBlock(r, 'Inspection Owed'),
       ...missedBlock(r),
+      ...correctionBlock(r),
       ...signatureBlock(r, sig),
       ...photos.blocks,
       ...forecastBlock(r),
     ] : [
       headerBlock(r, logo),
-      { text: 'CA SWPPP Inspection Report', alignment: 'center', bold: true, fontSize: 15, color: BLUE, margin: [0, 12, 0, 0] },
+      { text: 'CA SWPPP Inspection Report' + rev, alignment: 'center', bold: true, fontSize: 15, color: BLUE, margin: [0, 12, 0, 0] },
       ...weatherBlock(r),
       ...permitBlock(r),
       ...typeBlock(r),
@@ -532,6 +554,7 @@ export async function buildPdf(report, { logo, sig, loadPhoto }) {
       ...siteInfoBlock(r),
       ...samplingBlock(r),
       ...itemsBlock(r, photos.numbers),
+      ...correctionBlock(r),
       ...signatureBlock(r, sig),
       ...photos.blocks,
       ...historyBlock(r),
