@@ -321,7 +321,15 @@ async function startInspection(site, kind = 'inspection') {
     photos: [],
     sampling: null,
     signature: null,
+    vehicle: null,
   };
+  // whose vehicle (Brandon, 10/31): one tap at sign-off for an inspector set up to be asked; it feeds his bill
+  // (own car) or Brandon's miles bill (the truck). A second site the same day starts with the first one's answer.
+  if (asksVehicle(R)) {
+    const sameDay = (await reports.all()).filter((x) => x.status !== 'draft' && x.data.date === R.date && x.data.vehicle
+      && x.data.inspector.id === R.inspector.id).sort((a, b) => b.data.finished_ms - a.data.finished_ms)[0];
+    if (sameDay) Object.assign(R, { vehicle: sameDay.data.vehicle, vehicle_from: sameDay.data.site.name });
+  }
   if (kind === 'missed') {
     // Couldn't inspect (Att. D III.B.1): the reason and the story, for the Annual Report (III.B.2)
     Object.assign(R, { answers: {}, na_from_last: [], carried: [], items: [], missed: { reason: '', explain: '' } });
@@ -917,6 +925,7 @@ function missingAll() {
   if (R.revises && !R.revision_reason.trim()) m.push(['fix', 'Say what the correction changes and why']);
   if (!R.types.length) m.push(['type', 'Pick the inspection type']);
   if (R.carried.some((x) => !x.status)) m.push(['carried', 'Mark each open item still open or fixed']);
+  if (asksVehicle(R) && !R.vehicle) m.push(['finish', 'Say whose vehicle you drove']);
   if (R.kind === 'missed') {
     if (!R.missed.reason) m.push(['missed', "Pick why it couldn't be done"]);
     if (!R.missed.explain.trim()) m.push(['missed', 'Explain what happened']);
@@ -935,19 +944,55 @@ function missingAll() {
   return m;
 }
 
+// an inspection (not a couldn't-inspect record) by an inspector set up to be asked (config/sites.json `ask_vehicle`)
+function asksVehicle(R) {
+  return R.kind === 'inspection' && !!(R.inspector && R.inspector.ask_vehicle);
+}
+
+function missingBanner() {
+  const missing = missingAll();
+  return missing.length
+    ? h('div', { class: 'banner red' }, h('strong', {}, 'Still needed:'),
+      h('ul', { class: 'missing' }, missing.map(([id, t]) => h('li', {}, h('a', { href: '#card-' + id, onclick: (e) => { e.preventDefault(); document.getElementById('card-' + id)?.scrollIntoView({ behavior: 'smooth' }); } }, t)))),
+      h('button', { class: 'btn sm', style: 'margin-top:6px', onclick: () => repaint(['finish']) }, 'Check again'))
+    : h('div', { class: 'banner green' }, 'Everything is filled in.');
+}
+
+// whose vehicle: picked in place, so a signature already drawn stays put
+function vehiclePick(onchange) {
+  const { R } = cur;
+  const box = h('div', { class: 'field', id: 'vehicle' });
+  const paint = () => box.replaceChildren(
+    h('label', {}, 'Whose vehicle today?'),
+    h('div', { class: 'seg' }, [['own', 'My car'], ['truck', "Brandon's truck"]].map(([v, label]) => segBtn(label, R.vehicle === v, '', () => {
+      R.vehicle = v;
+      delete R.vehicle_from;
+      save();
+      paint();
+      onchange();
+    }))),
+    h('p', { class: 'hint', style: 'margin:6px 0 0' }, R.vehicle_from
+      ? `Same as your ${R.vehicle_from} report today. Tap the other one if that's wrong.`
+      : 'Your car goes on your bill as mileage; the truck goes on Brandon\'s.'));
+  paint();
+  return box;
+}
+
 function finishCard() {
   const { R } = cur;
-  const missing = missingAll();
   const canvas = h('canvas', { class: 'sig' });
   const btn = h('button', { class: 'btn primary block big', disabled: true }, 'Sign & finish');
   const clear = h('button', { class: 'btn sm ghost' }, 'Clear');
   const ins = R.inspector;
+  let banner = missingBanner();
   const el = card('finish', 'Sign & finish',
-    missing.length
-      ? h('div', { class: 'banner red' }, h('strong', {}, 'Still needed:'),
-        h('ul', { class: 'missing' }, missing.map(([id, t]) => h('li', {}, h('a', { href: '#card-' + id, onclick: (e) => { e.preventDefault(); document.getElementById('card-' + id)?.scrollIntoView({ behavior: 'smooth' }); } }, t)))),
-        h('button', { class: 'btn sm', style: 'margin-top:6px', onclick: () => repaint(['finish']) }, 'Check again'))
-      : h('div', { class: 'banner green' }, 'Everything is filled in.'),
+    banner,
+    asksVehicle(R) ? vehiclePick(() => {
+      const fresh = missingBanner();
+      banner.replaceWith(fresh);
+      banner = fresh;
+      btn.disabled = !cur.pad || cur.pad.isEmpty() || missingAll().length > 0;
+    }) : null,
     h('p', { style: 'margin:12px 0 4px' }, h('strong', {}, ins.name), `, ${ins.title}`, ins.cert ? h('span', { class: 'sub' }, ` · ${ins.cert}`) : null),
     h('div', { class: 'row' }, h('span', { class: 'sub grow' }, 'Sign with your finger'), clear),
     canvas,
@@ -1173,6 +1218,7 @@ async function startCorrection(orig) {
     supersedes: { id: latest.data.id, revision: latest.data.revision || 0, signed_ms: latest.data.signature ? latest.data.signature.signed_ms : null },
     signature: null, finished_ms: null, app_version: APP_VERSION,
   });
+  delete R.vehicle_from;
   // the photos come along; one missing on this phone is left out
   const photos = [];
   for (const p of R.photos) {
