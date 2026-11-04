@@ -54,9 +54,12 @@ async function request(url, payload, timeoutMs) {
   }
 }
 
+// What this app version can do, so the script holds back sites an older phone would mishandle (Code.gs configFor)
+const CAN = ['bank'];
+
 // Sign in with an inspector code; returns and caches { inspector, sites, logo }.
 export async function signIn(code) {
-  const out = await call({ action: 'config', code: code.trim() }, 30000);
+  const out = await call({ action: 'config', code: code.trim(), can: CAN }, 30000);
   await kv.set('code', code.trim());
   await kv.set('config', { ...out, fetched_ms: Date.now() });
   return out;
@@ -68,7 +71,7 @@ export async function refreshConfig(seen) {
   const code = await kv.get('code');
   if (!code) return null;
   try {
-    const out = await call({ action: 'config', code, seen: seen || {} }, 20000);
+    const out = await call({ action: 'config', code, seen: seen || {}, can: CAN }, 20000);
     await kv.set('config', { ...out, fetched_ms: Date.now() });
     return out;
   } catch (e) {

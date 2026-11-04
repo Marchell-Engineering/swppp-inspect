@@ -5,6 +5,7 @@
 
 import { TYPES, ANSWER_LABEL, NAL, MISSED_REASONS, shownSections, shownQuestions } from './checklist.js';
 import { fmtLocal, typeReasons } from './weather.js';
+import { SEEN_LABEL, NOTES, money, mapUrl } from './bank.js';
 
 const BLUE = '#24408e';
 const INK = '#1b1f2a';
@@ -511,9 +512,183 @@ function correctionBlock(r) {
   ];
 }
 
+// ---------------------------------------------------------------------------------------------
+// The PACS bank walk's field notes (Brandon, 11/4): what Brandon writes the PACS progress report from. Not the
+// report itself: no dollars judged, no percent observed, no billing call.
+
+function bankHeader(r, logo) {
+  const s = r.site;
+  const tz = r.tz;
+  const gps = r.gps ? `${r.gps.lat.toFixed(5)}, ${r.gps.lon.toFixed(5)} (±${r.gps.acc} m)` : 'no GPS fix';
+  const url = mapUrl(s);
+  return {
+    columns: [
+      logo ? { image: logo, width: 150 } : { text: 'Marchell Engineering', bold: true, color: BLUE, width: 150 },
+      {
+        width: '*',
+        stack: [
+          { text: s.name, bold: true, fontSize: 14, alignment: 'right', margin: [0, 0, 0, 6] },
+          {
+            table: {
+              widths: [78, '*'],
+              body: [
+                ['Walked by', { text: r.inspector.name }],
+                ['Started', { text: dt(r.started_ms, tz) }],
+                ['Finished', { text: dt(r.finished_ms, tz) }],
+                ['Site', url ? { text: s.address || '', link: url, color: BLUE, decoration: 'underline' } : { text: s.address || '' }],
+                ['GPS at start', { text: gps }],
+              ].map(([a, b]) => [{ text: a, color: MUTED }, b]),
+            },
+            layout: grid,
+            fontSize: 8.5,
+          },
+        ],
+      },
+    ],
+    columnGap: 16,
+  };
+}
+
+function kvRows(list) {
+  return {
+    table: { widths: [150, '*'], body: list.map(([a, b]) => [{ text: a, color: MUTED }, typeof b === 'object' && b !== null ? b : { text: b || '--' }]) },
+    layout: rows,
+  };
+}
+
+function drawBlock(r) {
+  const d = r.draw || {};
+  const s = r.site;
+  const out = [bar('Draw')];
+  out.push(kvRows([
+    ['Progress report', d.pr ? `PR#${d.pr}` : ''],
+    ['Draw', d.label],
+    ['Billed this draw', d.amount === null || d.amount === undefined ? '' : `${money(d.amount)}${d.work_dates ? `, for work ${d.work_dates}` : ''}`],
+    ['Last visit', d.last_visit],
+    ['For', [s.client, s.lender ? `lender ${s.lender}` : ''].filter(Boolean).join('; ')],
+    ['Scope', s.scope],
+  ].filter(([, b]) => b)));
+  if (d.ask) out.push({ text: d.ask, fontSize: 8.5, color: MUTED, margin: [0, 4, 0, 0] });
+  return out;
+}
+
+function billedBlock(r, photoNumbers) {
+  const out = [bar('Billed This Draw')];
+  const b = r.billed || [];
+  if (!b.length) {
+    out.push({ text: 'No billed items were loaded for this draw; see Building and unit work.', color: MUTED });
+    return out;
+  }
+  const total = b.reduce((t, x) => t + (Number(x.billed) || 0), 0);
+  const tone = (s) => (s === 'done' ? INK : s === 'not' ? RED : '#8a5a00');
+  out.push({
+    table: {
+      headerRows: 1,
+      widths: [54, 110, 56, 50, '*', 44],
+      body: [
+        ['Area', 'Work billed', 'Billed', 'Seen', 'What the walker saw', 'Photos'].map((t) => ({ text: t, color: MUTED, fontSize: 8 })),
+        ...b.map((x) => [
+          { text: x.area || '', bold: true },
+          x.work || '',
+          { text: money(x.billed), alignment: 'right' },
+          { text: SEEN_LABEL[x.seen] || '--', bold: true, color: tone(x.seen) },
+          x.note || '',
+          { text: (photoNumbers[x.id] || []).map((n) => `Photo ${n}`).join(', '), fontSize: 7.5 },
+        ]),
+        [{ text: 'Total', bold: true }, '', { text: money(total), alignment: 'right', bold: true }, '', '', ''],
+      ],
+      dontBreakRows: true,
+    },
+    layout: grid,
+    fontSize: 8.5,
+  });
+  return out;
+}
+
+function walkBlock(r) {
+  const w = r.walk || {};
+  return [
+    bar('Site Visit'),
+    kvRows([
+      ['Met on site', w.met],
+      ['Talked with by phone', w.phone_with],
+      ['Weather and ground', w.weather],
+    ]),
+    bar('Observations'),
+    kvRows(NOTES.map((n) => [n.title, w[n.id]])),
+    w.pct !== '' && w.pct !== undefined && w.pct !== null
+      ? { text: [{ text: "Walker's guess at percent complete: ", color: MUTED }, { text: `${w.pct}%`, bold: true }, { text: "  (a field read only; the report's percent observed is Brandon's)", color: MUTED, fontSize: 7.5 }], margin: [0, 8, 0, 0] }
+      : '',
+  ];
+}
+
+function walkSignature(r, sig) {
+  return [{
+    unbreakable: true,
+    stack: [
+      bar('Signature', 0),
+      {
+        columns: [
+          {
+            width: 230,
+            stack: [
+              sig ? { image: sig, width: 200 } : { text: '(no signature)', color: RED },
+              { canvas: [{ type: 'line', x1: 0, y1: 2, x2: 220, y2: 2, lineWidth: 0.6, lineColor: INK }] },
+              { text: 'Electronic signature', fontSize: 7.5, color: MUTED, margin: [0, 2, 0, 0] },
+            ],
+          },
+          {
+            width: '*',
+            table: { widths: [70, '*'], body: [['Walked by', r.signature.name], ['Signed', dt(r.signature.signed_ms, r.tz)]].map(([a, b]) => [{ text: a, color: MUTED }, b]) },
+            layout: rows,
+          },
+        ],
+        columnGap: 16,
+      },
+    ],
+  }];
+}
+
+async function buildBankPdf(r, { logo, sig, loadPhoto }) {
+  const pr = r.draw && r.draw.pr ? `PR#${r.draw.pr} ` : '';
+  const footerText = `${r.site.name} - ${pr}Walk Notes - ${r.date}${r.revision ? ` - Rev ${r.revision}` : ''}`;
+  const photos = await photoBlocks(r, loadPhoto);
+  const dd = {
+    pageSize: 'LETTER',
+    pageBreakBefore: (node) => (node.headlineLevel === 1 && node.startPosition.verticalRatio > 0.88)
+      || (node.headlineLevel === 2 && node.startPosition.verticalRatio > 0.66),
+    pageMargins: [40, 36, 40, 44],
+    defaultStyle: { fontSize: 9, color: INK, lineHeight: 1.12 },
+    info: { title: footerText, author: r.inspector.name, subject: 'Bank walk field notes', creator: 'Marchell SWPPP Inspect' },
+    footer: (page, pages) => ({
+      columns: [{ text: footerText, alignment: 'left' }, { text: `Page ${page} of ${pages}`, alignment: 'right' }],
+      fontSize: 7.5, color: MUTED, margin: [40, 14, 40, 0],
+    }),
+    content: [
+      bankHeader(r, logo),
+      { text: `${pr}Bank Walk Field Notes${r.revision ? ` (Revision ${r.revision})` : ''}`, alignment: 'center', bold: true, fontSize: 15, color: BLUE, margin: [0, 12, 0, 0] },
+      { text: 'Notes from the site walk, for the PACS progress report. Not the report itself.', alignment: 'center', fontSize: 8, color: MUTED, margin: [0, 2, 0, 0] },
+      ...drawBlock(r),
+      ...billedBlock(r, photos.numbers),
+      ...walkBlock(r),
+      ...correctionBlock(r),
+      ...walkSignature(r, sig),
+      ...photos.blocks,
+    ],
+  };
+  return new Promise((resolve, reject) => {
+    try {
+      window.pdfMake.createPdf(dd).getBlob(resolve);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 // report: the inspection record; logo/sig: data URLs; loadPhoto(photo) -> data URL
 export async function buildPdf(report, { logo, sig, loadPhoto }) {
   const r = report;
+  if (r.kind === 'bank') return buildBankPdf(r, { logo, sig, loadPhoto });
   const date = r.date;
   const missed = r.kind === 'missed';
   const rev = r.revision ? ` (Revision ${r.revision})` : '';

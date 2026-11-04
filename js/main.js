@@ -8,6 +8,7 @@ import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL, shownSectio
 import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, SigPad } from './media.js';
 import { buildPdf } from './pdf.js';
 import { APP_VERSION } from './settings.js';
+import { SEEN, NOTES, WEATHER_PICKS, money, mapUrl, walkPdfName } from './bank.js';
 
 const $app = document.getElementById('app');
 const $title = document.getElementById('title');
@@ -165,13 +166,17 @@ async function renderHome() {
         });
         return h('li', {},
           h('div', { class: 'grow' }, h('div', { style: 'font-weight:650' }, r.data.site.name),
-            h('div', { class: 'sub' }, r.data.revises ? `Correction of the ${mdy(r.data.date)} report` : `Started ${fmtLocal(r.data.started_ms, r.data.tz)}`)),
+            h('div', { class: 'sub' }, r.data.revises ? `Correction of the ${mdy(r.data.date)} ${r.data.kind === 'bank' ? 'walk notes' : 'report'}` : `Started ${fmtLocal(r.data.started_ms, r.data.tz)}`)),
           del,
           h('button', { class: 'btn sm primary', onclick: () => go({ name: 'inspect', id: r.id }) }, 'Resume'));
       }))));
   }
 
   for (const site of cfg.sites) {
+    if (site.kind === 'bank') {
+      out.push(bankSiteCard(site));
+      continue;
+    }
     const wx = await kv.get('wx:' + site.id);
     const chips = [];
     const open = site.open_items || [];
@@ -190,7 +195,7 @@ async function renderHome() {
     const due = whatsDue(Date.now(), wx && wx.forecast, await kv.get('seen:' + site.id), site.last, site.tz || 'America/Los_Angeles');
     out.push(h('div', { class: 'card site' },
       h('div', { class: 'name' }, site.name),
-      h('div', { class: 'meta' }, [site.address, site.wdid ? `WDID ${site.wdid}` : '', site.risk_level ? `Risk Level ${site.risk_level}` : ''].filter(Boolean).join(' · ')),
+      h('div', { class: 'meta' }, mapLink(site), [site.wdid ? `WDID ${site.wdid}` : '', site.risk_level ? `Risk Level ${site.risk_level}` : ''].filter(Boolean).map((t) => ' · ' + t).join('')),
       h('ul', { class: 'due' }, due.map((d) => h('li', { class: d.urgent ? 'urgent' : '' }, d.text,
         d.qsp && cfg.inspector.role !== 'qsp' ? h('span', { class: 'sub' }, ' (a QSP does this one)') : null))),
       h('div', { class: 'chips' }, chips),
@@ -205,7 +210,7 @@ async function renderHome() {
     out.push(h('div', { class: 'card' }, h('h2', {}, 'Reports on this phone'),
       h('ul', { class: 'list' }, done.map((r) => h('li', {},
         h('div', { class: 'grow' }, h('div', { style: 'font-weight:650' }, `${r.data.site.name}`),
-          h('div', { class: 'sub' }, `${mdy(r.data.date)} · ${r.data.types.map((t) => TYPES.find((x) => x.id === t).label).join(', ')}${r.data.revision ? ` · Rev ${r.data.revision}` : ''}`)),
+          h('div', { class: 'sub' }, `${mdy(r.data.date)} · ${r.data.kind === 'bank' ? `${r.data.draw && r.data.draw.pr ? `PR#${r.data.draw.pr} ` : ''}bank walk` : r.data.types.map((t) => TYPES.find((x) => x.id === t).label).join(', ')}${r.data.revision ? ` · Rev ${r.data.revision}` : ''}`)),
         superseded(r, all) ? h('span', { class: 'chip' }, 'Corrected') : h('span', { class: 'chip ' + (r.status === 'filed' ? 'green' : 'amber') }, r.status === 'filed' ? 'Filed' : 'Waiting'),
         h('button', { class: 'btn sm', onclick: () => go({ name: 'done', id: r.id }) }, 'Open'))))));
   }
@@ -232,7 +237,7 @@ async function renderHome() {
 async function syncConfig() {
   const cfg = await kv.get('config');
   const seen = {};
-  for (const site of (cfg && cfg.sites) || []) seen[site.id] = (await kv.get('seen:' + site.id)) || [];
+  for (const site of (cfg && cfg.sites) || []) if (site.kind !== 'bank') seen[site.id] = (await kv.get('seen:' + site.id)) || [];
   const out = await refreshConfig(seen);
   if (out) for (const site of out.sites) await kv.set('seen:' + site.id, unionSeen(seen[site.id], site.qpes || []));
   return out;
@@ -250,7 +255,7 @@ async function prefetchWeather() {
   const cfg = await kv.get('config');
   if (!cfg || !navigator.onLine) return;
   let changed = false;
-  for (const site of cfg.sites) {
+  for (const site of cfg.sites.filter((s) => s.kind !== 'bank')) {
     const old = await kv.get('wx:' + site.id);
     if (old && old.forecast && Date.now() - old.forecast.fetched_ms < 45 * 60e3) continue;
     const wx = await pullWeather(site).catch(() => null);
@@ -284,6 +289,7 @@ async function pullWeather(site, timeoutMs = 20000) {
 // starting an inspection
 
 async function startInspection(site, kind = 'inspection') {
+  if (site.kind === 'bank') return startBankWalk(site);
   const cfg = await kv.get('config');
   const now = Date.now();
   const tz = site.tz || 'America/Los_Angeles';
@@ -323,13 +329,7 @@ async function startInspection(site, kind = 'inspection') {
     signature: null,
     vehicle: null,
   };
-  // whose vehicle (Brandon, 10/31): one tap at sign-off for an inspector set up to be asked; it feeds his bill
-  // (own car) or Brandon's miles bill (the truck). A second site the same day starts with the first one's answer.
-  if (asksVehicle(R)) {
-    const sameDay = (await reports.all()).filter((x) => x.status !== 'draft' && x.data.date === R.date && x.data.vehicle
-      && x.data.inspector.id === R.inspector.id).sort((a, b) => b.data.finished_ms - a.data.finished_ms)[0];
-    if (sameDay) Object.assign(R, { vehicle: sameDay.data.vehicle, vehicle_from: sameDay.data.site.name });
-  }
+  await sameDayVehicle(R);
   if (kind === 'missed') {
     // Couldn't inspect (Att. D III.B.1): the reason and the story, for the Annual Report (III.B.2)
     Object.assign(R, { answers: {}, na_from_last: [], carried: [], items: [], missed: { reason: '', explain: '' } });
@@ -343,6 +343,78 @@ async function startInspection(site, kind = 'inspection') {
       save();
     }
   });
+}
+
+// whose vehicle (Brandon, 10/31): one tap at sign-off for an inspector set up to be asked; it feeds his bill
+// (own car) or Brandon's miles bill (the truck). A second site the same day (a bank walk on the SWPPP loop
+// too) starts with the first one's answer.
+async function sameDayVehicle(R) {
+  if (!asksVehicle(R)) return;
+  const sameDay = (await reports.all()).filter((x) => x.status !== 'draft' && x.data.date === R.date && x.data.vehicle
+    && x.data.inspector.id === R.inspector.id).sort((a, b) => b.data.finished_ms - a.data.finished_ms)[0];
+  if (sameDay) Object.assign(R, { vehicle: sameDay.data.vehicle, vehicle_from: sameDay.data.site.name });
+}
+
+// A PACS bank walk (Brandon, 11/4): walked against the draw on the site card, which comes along in the
+// record so the notes say which draw they checked
+async function startBankWalk(site) {
+  const cfg = await kv.get('config');
+  const now = Date.now();
+  const tz = site.tz || 'America/Los_Angeles';
+  const id = uid();
+  const d = site.draw || {};
+  const R = {
+    id,
+    kind: 'bank',
+    app_version: APP_VERSION,
+    tz,
+    site: {
+      id: site.id, kind: 'bank', name: site.name, short_name: site.short_name || '', address: site.address, lat: site.lat, lon: site.lon,
+      client: site.client || '', lender: site.lender || '', scope: site.scope || '', contact: site.contact || null,
+      trial: false, test: !!site.test, email_to: null,
+    },
+    draw: {
+      pr: d.pr || '', label: d.label || '', folder: d.folder || '', amount: d.amount === undefined ? null : d.amount,
+      work_dates: d.work_dates || '', last_visit: d.last_visit || '', ask: d.ask || '',
+    },
+    inspector: { ...cfg.inspector },
+    started_ms: now,
+    finished_ms: null,
+    date: localDate(now, tz),
+    gps: null,
+    types: [],
+    answers: {},
+    notes: {},
+    carried: [],
+    items: [],
+    billed: (d.items || []).map((x) => ({ id: x.id, area: x.area || '', work: x.work || '', billed: x.billed === undefined ? null : x.billed, seen: null, note: '' })),
+    walk: { met: '', phone_with: '', weather: '', pct: '', ...Object.fromEntries(NOTES.map((n) => [n.id, ''])) },
+    photos: [],
+    signature: null,
+    vehicle: null,
+  };
+  await sameDayVehicle(R);
+  const rec = { id, site_id: site.id, status: 'draft', created_ms: now, updated_ms: now, data: R, files: [], meta: { pdf_name: site.pdf_name } };
+  await reports.put(rec);
+  go({ name: 'inspect', id });
+  where().then((g) => {
+    if (g && cur && cur.R.id === id) {
+      cur.R.gps = g;
+      save();
+    }
+  });
+  // the weather line starts from the NWS current conditions when there's signal; the walker can type over it
+  if (navigator.onLine) {
+    pullWeather(site, 12000).then((wx) => {
+      const c = wx && wx.forecast && wx.forecast.current;
+      if (!c || !cur || cur.R.id !== id || cur.R.walk.weather) return;
+      cur.R.walk.weather = `${c.temp}°${c.unit}, ${c.short}`;
+      save();
+      // in place, so a box the walker is typing in keeps its focus
+      const el = document.getElementById('walk-weather');
+      if (el && !el.value) el.value = cur.R.walk.weather;
+    }).catch(() => {});
+  }
 }
 
 async function loadWeather(force) {
@@ -402,14 +474,25 @@ async function renderInspect(id) {
   $app.replaceChildren(...cards().map((c) => c.build()));
   paintJump();
   // a correction keeps the weather the inspection had; today's forecast would be wrong for it
-  if (!rec.data.revises && (!rec.data.weather.forecast || Date.now() - rec.data.started_ms < 5 * 60e3)) loadWeather(false);
+  if (rec.data.kind !== 'bank' && !rec.data.revises && (!rec.data.weather.forecast || Date.now() - rec.data.started_ms < 5 * 60e3)) loadWeather(false);
 }
 
 // each card: id, jump label, build(), status() -> 'done' | 'warn' | ''
 function cards() {
   const { R } = cur;
+  const fix = R.revises ? [{ id: 'fix', label: 'Correction', build: correctionCard, status: () => (R.revision_reason.trim() ? 'done' : 'warn') }] : [];
+  if (R.kind === 'bank') {
+    return [
+      ...fix,
+      { id: 'visit', label: 'Visit', build: visitCard, status: () => (R.walk.met.trim() ? 'done' : '') },
+      { id: 'billed', label: 'Billed items', build: billedCard, status: billedStatus },
+      { id: 'notes', label: 'Notes', build: notesCard, status: () => (NOTES.every((n) => R.walk[n.id].trim()) ? 'done' : '') },
+      { id: 'photos', label: 'Photos', build: photosCard, status: () => (R.photos.length ? 'done' : '') },
+      { id: 'finish', label: 'Sign', build: finishCard, status: () => '' },
+    ];
+  }
   const list = [
-    ...(R.revises ? [{ id: 'fix', label: 'Correction', build: correctionCard, status: () => (R.revision_reason.trim() ? 'done' : 'warn') }] : []),
+    ...fix,
     { id: 'wx', label: 'Weather', build: weatherCard, status: () => (R.weather.forecast ? 'done' : '') },
     { id: 'type', label: 'Type', build: typeCard, status: () => (R.types.length ? 'done' : 'warn') },
   ];
@@ -912,9 +995,127 @@ function pickPhotos(ref, caption, done) {
 }
 
 function photosCard() {
+  const bank = cur.R.kind === 'bank';
   return card('photos', 'Site photos',
-    h('p', { class: 'hint', style: 'margin-top:0' }, 'General photos of the site and the BMPs. Problem photos go with their question or action item above.'),
+    h('p', { class: 'hint', style: 'margin-top:0' }, bank
+      ? 'Wide shots: each building face, the street frontage, and anything else worth showing. Photos of a billed item go with it above.'
+      : 'General photos of the site and the BMPs. Problem photos go with their question or action item above.'),
     photoWidget('site', 'Site'));
+}
+
+// ---------------------------------------------------------------------------------------------
+// the bank walk's cards (Brandon, 11/4)
+
+function mapLink(site) {
+  const url = mapUrl(site);
+  return url ? h('a', { href: url, target: '_blank', rel: 'noopener', class: 'maplink' }, site.address || 'Map') : (site.address || '');
+}
+
+function bankSiteCard(site) {
+  const d = site.draw || {};
+  const items = d.items || [];
+  const areas = [...new Set(items.map((x) => x.area).filter(Boolean))];
+  const chips = [h('span', { class: 'chip blue' }, `Bank walk${site.client ? ' for ' + site.client.split(' (')[0] : ''}`)];
+  if (d.pr) chips.push(h('span', { class: 'chip' }, `PR#${d.pr}${d.label ? ' · ' + d.label : ''}`));
+  if (d.amount !== undefined && d.amount !== null) chips.push(h('span', { class: 'chip' }, `${money(d.amount)} billed`));
+  if (site.last && site.last.date) chips.push(h('span', { class: 'chip' }, `Last walk: ${mdy(site.last.date)} ${site.last.inspector || ''}`));
+  return h('div', { class: 'card site bank' },
+    h('div', { class: 'name' }, site.name),
+    h('div', { class: 'meta' }, mapLink(site)),
+    h('ul', { class: 'due' }, h('li', {}, items.length
+      ? `${items.length} item${items.length > 1 ? 's' : ''} billed this draw${areas.length ? ': ' + areas.join(', ') : ''}`
+      : 'No billed items loaded for this draw yet. Note what you see.')),
+    h('div', { class: 'chips' }, chips),
+    h('button', { class: 'btn primary block', onclick: () => startInspection(site) }, 'Start bank walk'));
+}
+
+// tap a pick to fill the box, or add it on a new line when there's already something there
+function pickRow(values, input, key, obj) {
+  return h('div', { class: 'picks' }, values.map((p) => h('button', {
+    onclick: () => {
+      const now = (obj[key] || '').trim();
+      if (now.split('\n').map((x) => x.trim()).includes(p)) return;
+      obj[key] = now ? `${now}\n${p}` : p;
+      input.value = obj[key];
+      save();
+    },
+  }, p)));
+}
+
+function visitCard() {
+  const { R } = cur;
+  const d = R.draw;
+  const s = R.site;
+  const c = s.contact;
+  const w = R.walk;
+  const bind = (k) => (e) => { w[k] = e.target.value; save(); };
+  const met = h('input', { type: 'text', value: w.met, placeholder: c && c.name ? `e.g. ${c.name}` : 'Name and company', oninput: (e) => { w.met = e.target.value; save(); } });
+  const phone = h('input', { type: 'text', value: w.phone_with, placeholder: 'Name, and what they told you goes in the notes', oninput: bind('phone_with') });
+  const wx = h('input', { type: 'text', id: 'walk-weather', value: w.weather, oninput: bind('weather') });
+  const metPicks = ['Nobody on site', ...(c && c.name ? [`${c.name}${c.role ? ` (${c.role})` : ''}`] : [])];
+  const url = mapUrl(s);
+  return card('visit', `${d.pr ? `PR#${d.pr}` : 'Bank walk'}${d.label ? ' · ' + d.label : ''}`,
+    h('div', { class: 'wx-grid' },
+      cell('Billed this draw', money(d.amount)),
+      cell('Work dates', d.work_dates || '--'),
+      cell('Last visit', d.last_visit || '--'),
+      cell('For', [s.client, s.lender].filter(Boolean).join(', ') || '--')),
+    d.ask ? h('div', { class: 'banner blue', style: 'margin:10px 0 0' }, d.ask) : null,
+    c ? h('div', { class: 'item' },
+      h('div', { class: 'row' }, h('span', { class: 't grow' }, c.name), c.phone ? h('a', { class: 'btn sm', href: 'tel:' + c.phone.replace(/[^\d+]/g, '') }, 'Call ' + c.phone) : null),
+      c.role ? h('div', { class: 'sub' }, c.role) : null,
+      c.note ? h('p', { style: 'margin:6px 0 0' }, c.note) : null) : null,
+    url ? h('a', { class: 'btn block', href: url, target: '_blank', rel: 'noopener', style: 'margin-top:10px' }, 'Open in Google Maps') : null,
+    h('p', { class: 'hint' }, s.address),
+    field('Who you met on site', met, false, h('div', { class: 'picks' }, metPicks.map((p) => h('button', { onclick: () => { w.met = p; met.value = p; save(); } }, p)))),
+    field('Talked with by phone', phone, true),
+    field('Weather and ground', wx, true, pickRow(WEATHER_PICKS, wx, 'weather', w)));
+}
+
+function billedStatus() {
+  const b = cur.R.billed;
+  if (b.some((x) => x.seen && x.seen !== 'done' && !x.note.trim())) return 'warn';
+  return b.every((x) => x.seen) ? 'done' : '';
+}
+
+function billedCard() {
+  const { R } = cur;
+  if (!R.billed.length) {
+    return card('billed', 'Billed this draw',
+      h('p', { class: 'hint', style: 'margin-top:0' }, 'No billed items were loaded for this draw. Note what you saw under Building and unit work.'));
+  }
+  return card('billed', 'Billed this draw',
+    h('p', { class: 'hint', style: 'margin-top:0' }, 'Check each item this draw bills. Mark it Done only if you saw the work. A photo of each one.'),
+    R.billed.map((x) => {
+      const box = h('div', { class: 'item' + (x.seen === 'done' ? ' closed' : x.seen === 'not' ? ' late' : '') },
+        h('div', { class: 'row' }, h('span', { class: 't grow' }, [x.area, x.work].filter(Boolean).join(': ')), x.billed !== null ? h('span', { class: 'chip' }, money(x.billed)) : null),
+        h('div', { class: 'seg', style: 'margin-top:10px' }, SEEN.map((o) => segBtn(o.label, x.seen === o.id, o.tone, () => {
+          x.seen = o.id;
+          save();
+          repaint(['billed']);
+        }))));
+      if (x.seen && x.seen !== 'done') {
+        box.append(field(x.seen === 'unseen' ? "Why you couldn't see it (required)" : 'What you saw (required)',
+          h('textarea', { value: x.note, placeholder: x.seen === 'unseen' ? 'e.g. Unit locked, no answer from Nicole' : 'e.g. Front and side primed, back not started', oninput: (e) => { x.note = e.target.value; save(); } })));
+      } else if (x.seen === 'done') {
+        box.append(field('Notes', h('input', { type: 'text', value: x.note, oninput: (e) => { x.note = e.target.value; save(); } }), true));
+      }
+      box.append(photoWidget('billed:' + x.id, [x.area, x.work].filter(Boolean).join(' ')));
+      return box;
+    }));
+}
+
+function notesCard() {
+  const { R } = cur;
+  const w = R.walk;
+  return card('notes', 'What you saw',
+    h('p', { class: 'hint', style: 'margin-top:0' }, 'Short notes are fine; Brandon writes the PACS report from these. Tap a button for the usual answer.'),
+    NOTES.map((n) => {
+      const ta = h('textarea', { value: w[n.id], oninput: (e) => { w[n.id] = e.target.value; save(); } });
+      return field(n.title, ta, true, h('p', { class: 'hint', style: 'margin:4px 0 0' }, n.hint), n.picks.length ? pickRow(n.picks, ta, n.id, w) : null);
+    }),
+    field('Your guess at percent complete', h('input', { type: 'number', inputmode: 'decimal', min: '0', max: '100', step: '0.5', value: w.pct, oninput: (e) => { w.pct = e.target.value; save(); } }), true,
+      h('p', { class: 'hint', style: 'margin:4px 0 0' }, "Your read only. Brandon sets the report's percent observed.")));
 }
 
 // --- finish and sign ----------------------------------------------------------------------------
@@ -923,6 +1124,15 @@ function missingAll() {
   const { R } = cur;
   const m = [];
   if (R.revises && !R.revision_reason.trim()) m.push(['fix', 'Say what the correction changes and why']);
+  if (R.kind === 'bank') {
+    if (!R.walk.met.trim()) m.push(['visit', 'Say who you met on site (or tap "Nobody on site")']);
+    const open = R.billed.filter((x) => !x.seen).length;
+    if (open) m.push(['billed', `Billed items: ${open} not checked yet`]);
+    const noNote = R.billed.filter((x) => x.seen && x.seen !== 'done' && !x.note.trim()).length;
+    if (noNote) m.push(['billed', `Billed items: say what you saw on ${noNote === 1 ? 'the one not done' : `the ${noNote} not done`}`]);
+    if (asksVehicle(R) && !R.vehicle) m.push(['finish', 'Say whose vehicle you drove']);
+    return m;
+  }
   if (!R.types.length) m.push(['type', 'Pick the inspection type']);
   if (R.carried.some((x) => !x.status)) m.push(['carried', 'Mark each open item still open or fixed']);
   if (asksVehicle(R) && !R.vehicle) m.push(['finish', 'Say whose vehicle you drove']);
@@ -944,9 +1154,10 @@ function missingAll() {
   return m;
 }
 
-// an inspection (not a couldn't-inspect record) by an inspector set up to be asked (config/sites.json `ask_vehicle`)
+// an inspection or a bank walk (not a couldn't-inspect record) by an inspector set up to be asked
+// (config/sites.json `ask_vehicle`)
 function asksVehicle(R) {
-  return R.kind === 'inspection' && !!(R.inspector && R.inspector.ask_vehicle);
+  return (R.kind === 'inspection' || R.kind === 'bank') && !!(R.inspector && R.inspector.ask_vehicle);
 }
 
 function missingBanner() {
@@ -993,14 +1204,17 @@ function finishCard() {
       banner = fresh;
       btn.disabled = !cur.pad || cur.pad.isEmpty() || missingAll().length > 0;
     }) : null,
-    h('p', { style: 'margin:12px 0 4px' }, h('strong', {}, ins.name), `, ${ins.title}`, ins.cert ? h('span', { class: 'sub' }, ` · ${ins.cert}`) : null),
+    // a bank walk isn't a QSP job: the walker's name only, no QSP title or certificate
+    R.kind === 'bank'
+      ? h('p', { style: 'margin:12px 0 4px' }, h('strong', {}, ins.name))
+      : h('p', { style: 'margin:12px 0 4px' }, h('strong', {}, ins.name), `, ${ins.title}`, ins.cert ? h('span', { class: 'sub' }, ` · ${ins.cert}`) : null),
     h('div', { class: 'row' }, h('span', { class: 'sub grow' }, 'Sign with your finger'), clear),
     canvas,
     h('div', { style: 'height:12px' }),
     btn,
     h('p', { class: 'hint' }, R.revises
       ? `Signing makes the corrected PDF (Revision ${R.revision}) on this phone. Once uploaded it takes the original's place in the job folder, and the original is kept beside its photos, marked superseded. It uploads by itself once there is signal.`
-      : `Signing locks the ${R.kind === 'missed' ? 'record' : 'report'} and makes the PDF on this phone, with no signal needed. ` + whereItGoes(R.site, R.kind) + ' It uploads by itself once there is signal.'));
+      : `Signing locks the ${R.kind === 'missed' ? 'record' : R.kind === 'bank' ? 'walk notes' : 'report'} and makes the PDF on this phone, with no signal needed. ` + whereItGoes(R.site, R.kind, R.draw) + ' It uploads by itself once there is signal.'));
   requestAnimationFrame(() => {
     const pad = new SigPad(canvas);
     cur.pad = pad;
@@ -1017,15 +1231,17 @@ async function finish(btn) {
   btn.disabled = true;
   btn.textContent = 'Making the PDF…';
   try {
-    if (!R.weather.forecast && navigator.onLine) {
+    if (R.kind !== 'bank' && !R.weather.forecast && navigator.onLine) {
       const wx = await pullWeather(cur.site, 10000).catch(() => null);
       if (wx && wx.forecast) applyWeather(wx);
     }
     R.finished_ms = Date.now();
     R.signature = { signed_ms: R.finished_ms, name: R.inspector.name, title: R.inspector.title, cert: R.inspector.cert || '' };
-    // photo order in the PDF: open items, new items, problems, then the site
-    const rank = (p) => ({ carried: 0, item: 1, q: 2, site: 3 }[p.ref.split(':')[0]] ?? 4);
-    R.photos.sort((a, b) => rank(a) - rank(b) || a.taken_ms - b.taken_ms);
+    // photo order in the PDF: open items, new items, problems (a bank walk's billed items, in draw order), then the site
+    const billedOrder = (p) => (R.billed || []).findIndex((x) => 'billed:' + x.id === p.ref);
+    const rank = (p) => ({ carried: 0, item: 1, q: 2, billed: 2, site: 3 }[p.ref.split(':')[0]] ?? 4);
+    if (R.kind === 'bank') R.photos.sort((a, b) => rank(a) - rank(b) || billedOrder(a) - billedOrder(b) || a.taken_ms - b.taken_ms);
+    else R.photos.sort((a, b) => rank(a) - rank(b) || a.taken_ms - b.taken_ms);
     R.carried.forEach((x) => { if (x.status === 'open') x.close_note = ''; });
 
     const sigBlob = await pad.toBlob();
@@ -1046,6 +1262,7 @@ async function finish(btn) {
     const same = (await reports.all()).filter((x) => x.id !== rec.id && x.site_id === rec.site_id && x.status !== 'draft' && !x.data.revises && x.data.date === R.date && (x.data.kind === 'missed') === missed).length;
     const base = missed
       ? `${R.date} ${R.site.name} - Inspection Not Conducted.pdf`
+      : R.kind === 'bank' ? walkPdfName(rec.meta.pdf_name, R)
       : (rec.meta.pdf_name || `${R.site.name}-CA SWPPP-{date}.pdf`).replace('{date}', R.date);
     // a correction keeps the name of the report it replaces, so billing counts the inspection once
     const pdfName = R.revises ? rec.meta.pdf_name_final : same ? base.replace(/\.pdf$/i, ` (${same + 1}).pdf`) : base;
@@ -1056,6 +1273,7 @@ async function finish(btn) {
       { key: `pdf:${rec.id}`, name: pdfName, kind: 'pdf', mime: 'application/pdf' },
     ];
     rec.meta = { ...rec.meta, pdf_name_final: pdfName, date: R.date };
+    R.pdf_name = pdfName;   // in the record too, so the laptop tools can tell same-day PDFs apart
     rec.status = 'signed';
     await reports.put(rec);
     cur = null;
@@ -1087,7 +1305,7 @@ async function renderDone(id) {
   const kids = [
     status,
     h('div', { class: 'card' },
-      h('h2', {}, rec.data.kind === 'missed' ? 'Record signed' : 'Report signed'),
+      h('h2', {}, rec.data.kind === 'missed' ? 'Record signed' : rec.data.kind === 'bank' ? 'Walk notes signed' : 'Report signed'),
       h('p', { class: 'sub', style: 'margin-top:0' }, `${mdy(rec.data.date)} · ${fmtLocal(rec.data.started_ms, rec.data.tz, { weekday: undefined, month: undefined, day: undefined })} to ${fmtLocal(rec.data.finished_ms, rec.data.tz, { weekday: undefined, month: undefined, day: undefined })} · ${rec.data.inspector.name}`),
       h('p', { class: 'small' }, name),
       url ? h('a', { class: 'btn primary block', href: url, target: '_blank', rel: 'noopener', download: name }, 'Open the PDF') : h('p', {}, 'The PDF is missing on this phone.'),
@@ -1106,7 +1324,7 @@ async function renderDone(id) {
   if (rec.status !== 'filed') {
     kids.splice(1, 0,
       h('button', { class: 'btn block', onclick: () => flush(true) }, 'Upload now'),
-      h('p', { class: 'hint', style: 'margin:6px 0 12px' }, whereItGoes(rec.data.site, rec.data.kind)));
+      h('p', { class: 'hint', style: 'margin:6px 0 12px' }, whereItGoes(rec.data.site, rec.data.kind, rec.data.draw)));
   }
   $app.replaceChildren(...kids);
 }
@@ -1237,7 +1455,7 @@ async function startCorrection(orig) {
 function correctionCard() {
   const { R } = cur;
   const signed = R.supersedes && R.supersedes.signed_ms ? ` (signed ${fmtLocal(R.supersedes.signed_ms, R.tz)})` : '';
-  return card('fix', `Correcting the ${mdy(R.date)} ${R.kind === 'missed' ? 'record' : 'report'}`,
+  return card('fix', `Correcting the ${mdy(R.date)} ${R.kind === 'missed' ? 'record' : R.kind === 'bank' ? 'walk notes' : 'report'}`,
     h('p', { class: 'hint', style: 'margin-top:0' }, `Revision ${R.revision} of the report${signed}. Change what was wrong, say what changed, and sign again. `
       + 'The corrected report replaces the original under the same name; the original is kept, marked superseded. '
       + 'Open items can\'t be added, dropped or marked fixed in a correction; the next inspection does that.'),
@@ -1245,9 +1463,10 @@ function correctionCard() {
 }
 
 // what the upload does, in words (Brandon 10/22: the Upload button didn't say what it was going to do)
-function whereItGoes(site, kind) {
+function whereItGoes(site, kind, draw) {
   const folder = site.test ? 'the test folder in Brandon\'s My Drive' : site.trial ? 'the job\'s trial folder on the shared drive' : 'the job folder on the shared drive';
   if (kind === 'missed') return `Uploading puts this record in ${folder}, for the Annual Report. No email goes out; Brandon sees it on his morning list.`;
+  if (kind === 'bank') return `Uploading puts the notes and photos in ${draw && draw.folder ? `the ${draw.folder} folder` : 'the job folder'} on the shared drive, for Brandon's PACS report. No email goes out.`;
   const mail = site.email_to === null || site.email_to === undefined
     ? site.trial ? ' Trial site: no email.' : ' No email is set up for this site.'
     : ` A report email${site.email_to ? ' to ' + site.email_to : ''} then waits in Brandon\'s Gmail drafts; nothing goes out until he sends it.`;
@@ -1258,6 +1477,7 @@ function filedNote(rec) {
   const site = rec.data.site;
   const where = site.test ? 'In the test folder.' : 'In the job folder on the shared drive.';
   if (rec.data.kind === 'missed') return `${where} Kept for the Annual Report; no email.`;
+  if (rec.data.kind === 'bank') return `In the ${rec.data.draw && rec.data.draw.folder ? rec.data.draw.folder + ' folder' : 'job folder'} on the shared drive, for Brandon's PACS report. No email.`;
   if (!(rec.filed && rec.filed.drafted)) return where;
   const em = rec.filed.email;
   if (em === 'updated') return `${where} The report email still waiting in Brandon's drafts now carries the corrected PDF.`;
