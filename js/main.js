@@ -2,7 +2,7 @@
 // Everything is saved on the phone as it is typed; nothing needs signal until the upload.
 
 import { kv, reports, blobs, persist, uid } from './store.js';
-import { signIn, refreshConfig, flushQueue, net, act, rememberBackend } from './api.js';
+import { signIn, refreshConfig, flushQueue, net, act, rememberBackend, historyPdf } from './api.js';
 import { fetchForecast, fetchGauges, lastRain, classify, whatsDue, mergeSeen, unionSeen, typeReasons, eventText, localDate, fmtLocal } from './weather.js';
 import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL, shownSections, shownQuestions, TYPE_SECTIONS, LEADS, MISSED_REASONS } from './checklist.js';
 import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, SigPad } from './media.js';
@@ -87,6 +87,7 @@ async function render() {
   if (view.name === 'home') return renderHome();
   if (view.name === 'inspect') return renderInspect(view.id);
   if (view.name === 'done') return renderDone(view.id);
+  if (view.name === 'history') return renderHistory(view.id);
 }
 
 $back.addEventListener('click', () => history.back());
@@ -214,7 +215,8 @@ async function renderHome() {
         d.qsp && cfg.inspector.role !== 'qsp' ? h('span', { class: 'sub' }, ' (a QSP does this one)') : null))),
       h('div', { class: 'chips' }, chips),
       h('button', { class: 'btn primary block', onclick: () => startInspection(site) }, 'Start inspection'),
-      h('button', { class: 'btn ghost block', style: 'margin-top:6px', onclick: () => startInspection(site, 'missed') }, "Couldn't inspect")));
+      h('button', { class: 'btn ghost block', style: 'margin-top:6px', onclick: () => startInspection(site, 'missed') }, "Couldn't inspect"),
+      historyButton(site)));
   }
 
   const alerts = await alertsCard(cfg);
@@ -1040,7 +1042,70 @@ function bankSiteCard(site) {
       ? `${items.length} item${items.length > 1 ? 's' : ''} billed this draw${areas.length ? ': ' + areas.join(', ') : ''}`
       : 'No billed items loaded for this draw yet. Note what you see.')),
     h('div', { class: 'chips' }, chips),
-    h('button', { class: 'btn primary block', onclick: () => startInspection(site) }, 'Start bank walk'));
+    h('button', { class: 'btn primary block', onclick: () => startInspection(site) }, 'Start bank walk'),
+    historyButton(site));
+}
+
+// ---------------------------------------------------------------------------------------------
+// a site's inspection history (Brandon, 11/5): every report on file, whoever signed it on whichever phone. The list
+// comes with the site, so it reads with no signal; getting a PDF needs signal.
+
+function historyButton(site) {
+  const n = (site.history || []).length;
+  return h('button', { class: 'btn block', style: 'margin-top:8px', onclick: () => go({ name: 'history', id: site.id }) }, n ? `History (${n})` : 'History');
+}
+
+function historyTitle(r) {
+  if (r.kind === 'missed') return 'Not conducted';
+  if (r.kind === 'bank') return r.pr ? `PR#${r.pr} walk` : 'Bank walk';
+  const words = (r.types || []).map((id) => (TYPES.find((t) => t.id === id) || { label: id }).label);
+  return words.join(', ') || 'Inspection';
+}
+
+function historyRow(site, r) {
+  const slot = h('div', {});
+  const note = h('div', { class: 'sub' });
+  const get = h('button', { class: 'btn sm' }, 'Get the PDF');
+  get.addEventListener('click', async () => {
+    get.disabled = true;
+    get.textContent = 'Getting it…';
+    note.textContent = '';
+    try {
+      const { name, blob } = await historyPdf(site.id, r.pdf);
+      slot.replaceChildren(h('a', { class: 'btn sm primary', href: URL.createObjectURL(blob), target: '_blank', rel: 'noopener', download: name }, 'Open the PDF'));
+    } catch (e) {
+      get.disabled = false;
+      get.textContent = 'Get the PDF';
+      note.textContent = navigator.onLine ? `That didn't work: ${e.message}` : 'Getting a past report needs signal.';
+    }
+  });
+  if (r.pdf) slot.append(get);
+  const bits = [r.who, r.gauge_text ? (/^\d/.test(r.gauge_text) ? `gauge ${r.gauge_text}` : r.gauge_text) : '', r.reason ? missedWords(r.reason) : '', r.revision ? `Revision ${r.revision}` : ''].filter(Boolean);
+  return h('li', {},
+    h('div', { class: 'grow' }, h('div', { style: 'font-weight:650' }, `${mdy(r.date)} · ${historyTitle(r)}`), h('div', { class: 'sub' }, bits.join(' · ')), note),
+    slot);
+}
+
+function missedWords(id) {
+  const m = (MISSED_REASONS || []).find((x) => x.id === id);
+  return m ? m.label : id;
+}
+
+async function renderHistory(id) {
+  cur = null;
+  const cfg = await kv.get('config');
+  const site = cfg && cfg.sites.find((s) => s.id === id);
+  if (!site) return go({ name: 'home' }, true);
+  $title.textContent = site.short_name || site.name;
+  $back.hidden = false;
+  const rows = site.history || [];
+  $app.replaceChildren(
+    h('div', { class: 'card' }, h('h2', {}, `${site.name}: history`),
+      rows.length
+        ? h('ul', { class: 'list' }, rows.map((r) => historyRow(site, r)))
+        : h('p', { class: 'hint', style: 'margin:0' }, site.history ? 'Nothing on file here yet.' : 'The history comes down the next time this phone has signal.'),
+      h('p', { class: 'hint' }, 'A report still uploading shows up here once it\'s filed.')),
+    h('button', { class: 'btn block', onclick: () => go({ name: 'home' }) }, 'Back to sites'));
 }
 
 // tap a pick to fill the box, or add it on a new line when there's already something there

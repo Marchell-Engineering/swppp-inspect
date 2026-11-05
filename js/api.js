@@ -55,7 +55,7 @@ async function request(url, payload, timeoutMs) {
 }
 
 // What this app version can do, so the script holds back sites an older phone would mishandle (Code.gs configFor)
-const CAN = ['bank'];
+const CAN = ['bank', 'history'];
 
 // Sign in with an inspector code; returns and caches { inspector, sites, logo }.
 export async function signIn(code) {
@@ -77,6 +77,14 @@ export async function refreshConfig(seen) {
   } catch (e) {
     return null;
   }
+}
+
+// One past report's PDF from the site's history, as a Blob and its file name.
+export async function historyPdf(siteId, pdf) {
+  const code = await kv.get('code');
+  const out = await call({ action: 'history_pdf', code, site_id: siteId, pdf }, 90000);
+  const bytes = Uint8Array.from(atob(out.data), (c) => c.charCodeAt(0));
+  return { name: out.name, blob: new Blob([bytes], { type: 'application/pdf' }) };
 }
 
 // Any other request made with this phone's code (phone alerts: push_on, push_off, push_test).
