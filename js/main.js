@@ -94,6 +94,15 @@ $back.addEventListener('click', () => history.back());
 // ---------------------------------------------------------------------------------------------
 // sign in
 
+// A sign-in link: the app's address with #join=<code> (tools/sign_in_link.py; Brandon 11/5). The code sits after the #, so
+// it never reaches the web host; boot() takes it off the address bar right away. The box takes a pasted link too.
+function joinCode(text) {
+  const m = /[#&?]join=([^&\s]+)/.exec(text || '');
+  if (!m) return null;
+  try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
+}
+let pendingJoin = null;
+
 function renderSignIn(error) {
   cur = null;
   $title.textContent = 'SWPPP Inspect';
@@ -105,7 +114,7 @@ function renderSignIn(error) {
     btn.disabled = true;
     btn.textContent = 'Signing in…';
     try {
-      const out = await signIn(input.value);
+      const out = await signIn(joinCode(input.value) || input.value);
       // the storms the script knows (other phones, the laptop's record), so the first report has them too
       for (const site of out.sites) await kv.set('seen:' + site.id, unionSeen(await kv.get('seen:' + site.id), site.qpes || []));
       go({ name: 'home' }, true);
@@ -122,6 +131,11 @@ function renderSignIn(error) {
     h('img', { src: 'img/logo.png', alt: 'Marchell Engineering' }),
     h('div', { class: 'card' }, h('h2', {}, 'SWPPP inspections'), input, h('div', { style: 'height:10px' }), btn, msg),
   ));
+  if (pendingJoin) {   // came in on a sign-in link: nothing to type
+    input.value = pendingJoin;
+    pendingJoin = null;
+    btn.click();
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1542,7 +1556,9 @@ function registerSW() {
   }).catch(() => {});
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (reloading || view.name === 'inspect') return;
+    // not during an inspection, and not on the sign-in screen: on a phone's first visit the offline layer takes over
+    // seconds in, and a reload there would throw away a code being typed or a sign-in link still working (11/5)
+    if (reloading || ['boot', 'inspect', 'signin'].includes(view.name)) return;
     reloading = true;
     location.reload();
   });
@@ -1564,8 +1580,11 @@ async function boot() {
   if (LOCAL && params.get('backend')) await kv.set('backend_override', params.get('backend'));
   await rememberBackend();
 
+  const join = joinCode(location.hash);
+  if (join) history.replaceState(history.state, '', location.pathname + location.search);
   const cfg = await kv.get('config');
   if (!cfg) {
+    pendingJoin = join;
     view = { name: 'signin' };
     history.replaceState(view, '');
     return render();
@@ -1573,6 +1592,10 @@ async function boot() {
   view = { name: 'home' };
   history.replaceState(view, '');
   await render();
+  // a link for someone else never swaps who's signed in here: that phone may hold their unsent reports
+  if (join && join.trim().toUpperCase() !== String((await kv.get('code')) || '').trim().toUpperCase()) {
+    toast(`This phone is signed in as ${cfg.inspector.name}. Sign out first to use that link.`);
+  }
   prefetchWeather().then(syncConfig).then((c) => { if (c && view.name === 'home') renderHome(); });
   flush();
 }
