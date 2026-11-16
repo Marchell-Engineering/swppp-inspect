@@ -1111,8 +1111,10 @@ function historyTitle(r) {
   return words.join(', ') || 'Inspection';
 }
 
-function historyRow(site, r) {
-  const slot = h('div', {});
+// `fix`: this phone's own signed copy of the report, when it has one (only the phone that made a report can
+// correct it, since the correction starts from its data and photos)
+function historyRow(site, r, fix) {
+  const slot = h('div', { class: 'row', style: 'justify-content:flex-end' });
   const note = h('div', { class: 'sub' });
   const get = h('button', { class: 'btn sm' }, 'Get the PDF');
   get.addEventListener('click', async () => {
@@ -1121,7 +1123,7 @@ function historyRow(site, r) {
     note.textContent = '';
     try {
       const { name, blob } = await historyPdf(site.id, r.pdf);
-      slot.replaceChildren(h('a', { class: 'btn sm primary', href: URL.createObjectURL(blob), target: '_blank', rel: 'noopener', download: name }, 'Open the PDF'));
+      get.replaceWith(h('a', { class: 'btn sm primary', href: URL.createObjectURL(blob), target: '_blank', rel: 'noopener', download: name }, 'Open the PDF'));
     } catch (e) {
       get.disabled = false;
       get.textContent = 'Get the PDF';
@@ -1129,6 +1131,8 @@ function historyRow(site, r) {
     }
   });
   if (r.pdf) slot.append(get);
+  // Brandon 11/16: "I still don't see how to edit an inspection post-facto (like ComplianceGo would let you do)"
+  if (fix) slot.append(h('button', { class: 'btn sm', onclick: () => startCorrection(fix) }, 'Correct'));
   const bits = [r.who, r.gauge_text ? (/^\d/.test(r.gauge_text) ? `gauge ${r.gauge_text}` : r.gauge_text) : '', r.reason ? missedWords(r.reason) : '', r.revision ? `Revision ${r.revision}` : ''].filter(Boolean);
   return h('li', {},
     h('div', { class: 'grow' }, h('div', { style: 'font-weight:650' }, `${mdy(r.date)} · ${historyTitle(r)}`), h('div', { class: 'sub' }, bits.join(' · ')), note),
@@ -1204,6 +1208,14 @@ async function renderHistory(id) {
   const hasItems = Array.isArray(site.items);
   const today = localDate(Date.now(), site.tz || 'America/Los_Angeles');
   const days = dayEvents(rows, items);
+  // the reports this phone signed and filed, by their first version's id: these can be corrected from here
+  const mine = {};
+  for (const rec of await reports.all()) {
+    if (rec.status !== 'filed' || rec.site_id !== site.id || !rec.data.inspector || rec.data.inspector.id !== cfg.inspector.id) continue;
+    const key = rec.data.revises || rec.data.id;
+    if (!mine[key] || (rec.data.revision || 0) > (mine[key].data.revision || 0)) mine[key] = rec;
+  }
+  const row = (r) => historyRow(site, r, mine[r.key]);
   const view = { month: today.slice(0, 7), day: '', tab: 'reports' };
   try { view.tab = (await kv.get('history_tab')) || 'reports'; } catch (e) { /* the default */ }
   if (view.tab === 'items' && !hasItems) view.tab = 'reports';
@@ -1269,7 +1281,7 @@ async function renderHistory(id) {
     const parts = [h('h3', { style: 'margin-top:0' }, new Date(view.day + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' }))];
     if (!e) parts.push(h('p', { class: 'hint', style: 'margin:0' }, 'Nothing on file this day.'));
     else {
-      if (e.reports.length) parts.push(h('ul', { class: 'list' }, e.reports.map((r) => historyRow(site, r))));
+      if (e.reports.length) parts.push(h('ul', { class: 'list' }, e.reports.map(row)));
       const group = (label, list) => { if (list.length) parts.push(h('div', { class: 'sub', style: 'margin-top:10px;font-weight:650' }, label), h('ul', { class: 'list' }, list.map((x) => itemRow(x, today)))); };
       group('Items opened', e.opened);
       group('Items fixed', e.fixed);
@@ -1295,7 +1307,8 @@ async function renderHistory(id) {
         : [h('p', { class: 'hint', style: 'margin:0' }, 'No action items on record here.')];
     } else {
       body = rows.length
-        ? [h('ul', { class: 'list' }, rows.map((r) => historyRow(site, r))), h('p', { class: 'hint' }, 'A report still uploading shows up here once it\'s filed.')]
+        ? [h('ul', { class: 'list' }, rows.map(row)),
+          h('p', { class: 'hint' }, 'A report still uploading shows up here once it\'s filed. Correct shows on the reports this phone signed; a report from another phone is corrected on that phone.')]
         : [h('p', { class: 'hint', style: 'margin:0' }, site.history ? 'Nothing on file here yet.' : 'The history comes down the next time this phone has signal.')];
     }
     listBox.replaceChildren(tabs, ...body);
@@ -1503,6 +1516,7 @@ function finishCard() {
       ? `Signing makes the corrected PDF (Revision ${R.revision}) on this phone. Once uploaded it takes the original's place in the job folder, and the original is kept beside its photos, marked superseded. It uploads by itself once there is signal.`
       : `Signing locks the ${R.kind === 'missed' ? 'record' : R.kind === 'bank' ? 'walk notes' : 'report'} and makes the PDF on this phone, with no signal needed. ` + whereItGoes(R.site, R.kind, R.draw) + ' It uploads by itself once there is signal.'));
   requestAnimationFrame(() => {
+    if (!cur || !canvas.isConnected) return;   // left the screen before it drew
     const pad = new SigPad(canvas);
     cur.pad = pad;
     pad.onchange = () => { btn.disabled = pad.isEmpty() || missingAll().length > 0; };
