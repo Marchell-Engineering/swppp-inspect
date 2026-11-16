@@ -53,6 +53,63 @@ export async function blobToBase64(blob) {
   return url.slice(url.indexOf(',') + 1);
 }
 
+// Where a photo was taken, from the GPS the camera wrote into it (Brandon, 11/16: "can the GPS pull from the
+// photo instead of the location the phone was in"). A JPEG's EXIF GPS block, read off the original file before
+// it is shrunk. Many phones strip it when a web page picks a photo, so this is often null; never throws.
+export async function exifGps(file) {
+  try {
+    const v = new DataView(await file.slice(0, 256 * 1024).arrayBuffer());
+    if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) return null;
+    let o = 2;
+    while (o + 4 <= v.byteLength) {
+      const marker = v.getUint16(o);
+      const len = v.getUint16(o + 2);
+      if (marker === 0xffe1 && v.getUint32(o + 4) === 0x45786966) return tiffGps(v, o + 10);   // 'Exif'
+      if ((marker & 0xff00) !== 0xff00 || marker === 0xffda) return null;
+      o += 2 + len;
+    }
+  } catch (e) { /* not a JPEG we can read */ }
+  return null;
+}
+
+function tiffGps(v, t) {
+  const le = v.getUint16(t) === 0x4949;
+  const u16 = (o) => v.getUint16(t + o, le);
+  const u32 = (o) => v.getUint32(t + o, le);
+  const tags = (ifd) => {
+    const out = {};
+    for (let i = 0, n = u16(ifd); i < n; i++) {
+      const e = ifd + 2 + i * 12;
+      out[u16(e)] = { type: u16(e + 2), count: u32(e + 4), at: e + 8 };
+    }
+    return out;
+  };
+  const gpsPtr = tags(u32(4))[0x8825];
+  if (!gpsPtr) return null;
+  const g = tags(u32(gpsPtr.at));
+  const ref = (k) => (g[k] ? String.fromCharCode(v.getUint8(t + g[k].at)) : '');
+  const dms = (k) => {
+    if (!g[k] || g[k].type !== 5 || g[k].count < 3) return null;
+    const at = u32(g[k].at);
+    const r = (i) => { const d = u32(at + i * 8 + 4); return d ? u32(at + i * 8) / d : 0; };
+    return r(0) + r(1) / 60 + r(2) / 3600;
+  };
+  let lat = dms(2);
+  let lon = dms(4);
+  if (lat === null || lon === null || (lat === 0 && lon === 0)) return null;
+  if (ref(1) === 'S') lat = -lat;
+  if (ref(3) === 'W') lon = -lon;
+  return { lat, lon, acc: null, from: 'photo' };
+}
+
+// metres between two fixes
+export function metres(a, b) {
+  const rad = Math.PI / 180;
+  const x = (b.lon - a.lon) * rad * Math.cos(((a.lat + b.lat) / 2) * rad);
+  const y = (b.lat - a.lat) * rad;
+  return Math.sqrt(x * x + y * y) * 6371e3;
+}
+
 // GPS works with no cell signal; it just takes longer to lock on. Never throws: no fix is fine.
 export function where(timeoutMs = 15000) {
   return new Promise((resolve) => {

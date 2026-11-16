@@ -55,7 +55,7 @@ async function request(url, payload, timeoutMs) {
 }
 
 // What this app version can do, so the script holds back sites an older phone would mishandle (Code.gs configFor)
-const CAN = ['bank', 'history'];
+const CAN = ['bank', 'history', 'items'];
 
 // Sign in with an inspector code; returns and caches { inspector, sites, logo }.
 export async function signIn(code) {

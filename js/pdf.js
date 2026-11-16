@@ -294,7 +294,7 @@ function itemsBlock(r, photoNumbers) {
   const tz = r.tz;
   const all = [
     ...r.carried.map((x) => ({ ...x, carried: true })),
-    ...r.items.map((x) => ({ ...x, carried: false, status: 'open', date: r.date, inspector: r.inspector.name })),
+    ...r.items.map((x) => ({ ...x, carried: false, status: 'open', date: x.opened || r.date, inspector: r.inspector.name })),
   ];
   if (!all.length) {
     out.push({ text: 'There are no action items.', color: MUTED });
@@ -504,6 +504,9 @@ function correctionBlock(r) {
         body: [
           ['Revision', String(r.revision)],
           ['What changed, and why', r.revision_reason],
+          // items this revision added (Brandon, 11/16): opened on the day of the correction, not the inspection's
+          ...((r.items || []).some((x) => x.added_rev === r.revision)
+            ? [['Action items added', r.items.filter((x) => x.added_rev === r.revision).map((x) => `${x.title}, opened ${day(x.opened)}, due ${day(x.due)}`).join('\n')]] : []),
           ['Replaces', `The ${r.supersedes && r.supersedes.revision ? `Revision ${r.supersedes.revision}` : 'original report'} signed ${was}, kept on file marked superseded`],
         ].map(([a, b]) => [{ text: a, color: MUTED }, { text: b || '--' }]),
       },
