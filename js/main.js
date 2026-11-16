@@ -9,6 +9,8 @@ import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, exifGps, metres, SigPa
 import { buildPdf } from './pdf.js';
 import { APP_VERSION } from './settings.js';
 import { SEEN, NOTES, WEATHER_PICKS, money, mapUrl, walkPdfName } from './bank.js';
+import { h, segBtn } from './dom.js';
+import { historyView, reportRow } from './history.js';
 
 const $app = document.getElementById('app');
 const $title = document.getElementById('title');
@@ -24,25 +26,6 @@ let cur = null;          // the open inspection: { rec, R, site }
 let saveTimer = null;
 let swWaiting = null;
 const uploadNote = {};   // report id -> latest upload message
-
-// ---------------------------------------------------------------------------------------------
-// tiny DOM helper
-
-function h(tag, attrs, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (v === null || v === undefined || v === false) continue;
-    if (k === 'class') el.className = v;
-    else if (k === 'value') el.value = v;
-    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
-    else el.setAttribute(k, v === true ? '' : v);
-  }
-  for (const kid of kids.flat(Infinity)) {
-    if (kid === null || kid === undefined || kid === false || kid === '') continue;
-    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  }
-  return el;
-}
 
 function toast(text, ms = 2600) {
   $toast.textContent = text;
@@ -717,10 +700,6 @@ function carriedCard() {
     }));
 }
 
-function segBtn(label, on, tone, onclick) {
-  return h('button', { class: (on ? 'on ' : '') + (tone || ''), onclick }, label);
-}
-
 // --- checklist sections --------------------------------------------------------------------------
 
 function sectionStatus(s) {
@@ -1104,13 +1083,6 @@ function historyButton(site) {
   return h('button', { class: 'btn block', style: 'margin-top:8px', onclick: () => go({ name: 'history', id: site.id }) }, n ? `History (${n})` : 'History');
 }
 
-function historyTitle(r) {
-  if (r.kind === 'missed') return 'Not conducted';
-  if (r.kind === 'bank') return r.pr ? `PR#${r.pr} walk` : 'Bank walk';
-  const words = (r.types || []).map((id) => (TYPES.find((t) => t.id === id) || { label: id }).label);
-  return words.join(', ') || 'Inspection';
-}
-
 // `fix`: this phone's own signed copy of the report, when it has one (only the phone that made a report can
 // correct it, since the correction starts from its data and photos)
 function historyRow(site, r, fix) {
@@ -1133,69 +1105,11 @@ function historyRow(site, r, fix) {
   if (r.pdf) slot.append(get);
   // Brandon 11/16: "I still don't see how to edit an inspection post-facto (like ComplianceGo would let you do)"
   if (fix) slot.append(h('button', { class: 'btn sm', onclick: () => startCorrection(fix) }, 'Correct'));
-  const bits = [r.who, r.gauge_text ? (/^\d/.test(r.gauge_text) ? `gauge ${r.gauge_text}` : r.gauge_text) : '', r.reason ? missedWords(r.reason) : '', r.revision ? `Revision ${r.revision}` : ''].filter(Boolean);
-  return h('li', {},
-    h('div', { class: 'grow' }, h('div', { style: 'font-weight:650' }, `${mdy(r.date)} · ${historyTitle(r)}`), h('div', { class: 'sub' }, bits.join(' · ')), note),
-    slot);
+  return reportRow(r, slot, note);
 }
 
-function missedWords(id) {
-  const m = (MISSED_REASONS || []).find((x) => x.id === id);
-  return m ? m.label : id;
-}
-
-// The History screen (Brandon 11/16: "a clickable calendar with inspections and action items", and the action items
-// tab "so they can see when things are getting addressed"): a month calendar marking each report and each item's
-// opened, due and fixed days; tap a day for what happened on it; under it the Reports list and the Action items
-// list. Everything comes down with the site, so it all reads with no signal.
-
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-
-// an item's standing: { word, tone, late } as of today
-function itemState(x, today) {
-  if (x.closed_on) {
-    const late = x.due && x.closed_on > x.due ? Math.round((Date.parse(x.closed_on) - Date.parse(x.due)) / 864e5) : 0;
-    return { word: `Fixed ${mdy(x.closed_on)}${late ? `, ${late} day${late > 1 ? 's' : ''} late` : x.due ? ', on time' : ''}`, tone: late ? 'amber' : 'green', closed: true };
-  }
-  if (x.closed_text) return { word: 'Closed, date not on record', tone: '', closed: true };
-  if (x.reported) return { word: `Marked fixed by ${x.reported.by}, to confirm`, tone: 'blue', closed: false };
-  if (x.due && x.due < today) return { word: `Open, ${Math.round((Date.parse(today) - Date.parse(x.due)) / 864e5)} days past due`, tone: 'red', closed: false };
-  return { word: 'Open', tone: 'amber', closed: false };
-}
-
-// each day's events: { reports: [], opened: [], due: [], fixed: [], seen: [] }
-function dayEvents(rows, items) {
-  const days = {};
-  const at = (d) => days[d] || (days[d] = { reports: [], opened: [], due: [], fixed: [], seen: [] });
-  for (const r of rows) if (r.date) at(r.date).reports.push(r);
-  for (const x of items) {
-    if (x.opened) at(x.opened).opened.push(x);
-    if (x.due) at(x.due).due.push(x);
-    if (x.closed_on) at(x.closed_on).fixed.push(x);
-    for (const d of x.seen_open || []) at(d).seen.push(x);
-  }
-  return days;
-}
-
-function itemRow(x, today, onDay) {
-  const st = itemState(x, today);
-  const bits = [`Opened ${mdy(x.opened)}${x.by ? ' by ' + x.by : ''}`, x.due ? `due ${mdy(x.due)}` : ''].filter(Boolean);
-  const kids = [
-    h('div', { class: 'row' }, h('span', { class: 't grow', style: 'font-weight:650' }, x.title), h('span', { class: 'chip ' + st.tone }, st.word)),
-    h('div', { class: 'sub' }, bits.join(' · ')),
-  ];
-  if (x.description) kids.push(h('p', { style: 'margin:6px 0 0' }, x.description));
-  if (x.location) kids.push(h('div', { class: 'sub' }, x.location));
-  if ((x.seen_open || []).length) kids.push(h('div', { class: 'sub' }, `Still open at the ${x.seen_open.map(mdy).join(', ')} inspection${x.seen_open.length > 1 ? 's' : ''}`));
-  if (x.reported) kids.push(h('div', { class: 'sub' }, `${x.reported.by} marked it fixed ${shortDate(x.reported.at, 'America/Los_Angeles')}${x.reported.note ? `: "${x.reported.note}"` : ''}`));
-  if (x.closed_on && (x.close_note || x.confirmed_on)) {
-    kids.push(h('div', { class: 'sub' }, [x.close_note ? `"${x.close_note}"` : '', x.confirmed_on ? `confirmed at the ${mdy(x.confirmed_on)} inspection${x.confirmed_by ? ' (' + x.confirmed_by + ')' : ''}` : ''].filter(Boolean).join(', ')));
-  }
-  if (x.closed_text) kids.push(h('div', { class: 'sub' }, x.closed_text));
-  if (onDay && x.opened) kids.push(h('button', { class: 'btn sm ghost', style: 'margin-top:4px;padding-left:0', onclick: () => onDay(x.opened) }, 'On the calendar'));
-  return h('li', { class: 'hist-item' }, h('div', { class: 'grow' }, ...kids));
-}
-
+// The History screen: the calendar and the Reports / Action items lists (js/history.js, the same code the
+// report email's no-login page draws). Everything comes down with the site, so it all reads with no signal.
 async function renderHistory(id) {
   cur = null;
   const cfg = await kv.get('config');
@@ -1203,11 +1117,7 @@ async function renderHistory(id) {
   if (!site) return go({ name: 'home' }, true);
   $title.textContent = site.short_name || site.name;
   $back.hidden = false;
-  const rows = site.history || [];
-  const items = site.items || [];
-  const hasItems = Array.isArray(site.items);
   const today = localDate(Date.now(), site.tz || 'America/Los_Angeles');
-  const days = dayEvents(rows, items);
   // the reports this phone signed and filed, by their first version's id: these can be corrected from here
   const mine = {};
   for (const rec of await reports.all()) {
@@ -1215,117 +1125,21 @@ async function renderHistory(id) {
     const key = rec.data.revises || rec.data.id;
     if (!mine[key] || (rec.data.revision || 0) > (mine[key].data.revision || 0)) mine[key] = rec;
   }
-  const row = (r) => historyRow(site, r, mine[r.key]);
-  const view = { month: today.slice(0, 7), day: '', tab: 'reports' };
-  try { view.tab = (await kv.get('history_tab')) || 'reports'; } catch (e) { /* the default */ }
-  if (view.tab === 'items' && !hasItems) view.tab = 'reports';
-
-  const calBox = h('div', {});
-  const dayBox = h('div', {});
-  const listBox = h('div', {});
-
-  const showDay = (d) => {
-    view.day = d;
-    view.month = d.slice(0, 7);
-    paintCal();
-    paintDay();
-    calBox.scrollIntoView({ block: 'start', behavior: 'smooth' });
-  };
-
-  function paintCal() {
-    const [y, m] = view.month.split('-').map(Number);
-    const first = new Date(Date.UTC(y, m - 1, 1));
-    const n = new Date(Date.UTC(y, m, 0)).getUTCDate();
-    const cells = [];
-    for (let i = 0; i < first.getUTCDay(); i++) cells.push(h('div', { class: 'cal-day empty' }));
-    for (let d = 1; d <= n; d++) {
-      const iso = `${view.month}-${String(d).padStart(2, '0')}`;
-      const e = days[iso];
-      const marks = [];
-      if (e) {
-        for (const r of e.reports) marks.push(h('span', { class: 'mk ' + (r.kind === 'missed' ? 'missed' : 'insp'), title: historyTitle(r) }));
-        if (e.opened.length) marks.push(h('span', { class: 'mk opened', title: 'Item opened' }));
-        if (e.fixed.length) marks.push(h('span', { class: 'mk fixed', title: 'Item fixed' }));
-        // a due date still open, or missed: red; one met: an outline
-        if (e.due.length) marks.push(h('span', { class: 'mk due' + (e.due.some((x) => !x.closed_on && !x.closed_text ? iso < today : x.closed_on > x.due) ? ' late' : ''), title: 'Item due' }));
-      }
-      cells.push(h('button', {
-        class: 'cal-day' + (iso === today ? ' today' : '') + (iso === view.day ? ' on' : '') + (e ? ' has' : ''),
-        onclick: () => { view.day = iso; paintCal(); paintDay(); },
-      }, h('span', { class: 'n' }, String(d)), h('span', { class: 'mks' }, marks)));
-    }
-    const step = (k) => {
-      const t = new Date(Date.UTC(y, m - 1 + k, 1));
-      view.month = t.toISOString().slice(0, 7);
-      view.day = '';
-      paintCal();
-      paintDay();
-    };
-    calBox.replaceChildren(
-      h('div', { class: 'row cal-head' },
-        h('button', { class: 'btn sm ghost', 'aria-label': 'Month before', onclick: () => step(-1) }, '‹'),
-        h('strong', { class: 'grow', style: 'text-align:center' }, `${MONTHS[m - 1]} ${y}`),
-        h('button', { class: 'btn sm ghost', 'aria-label': 'Month after', onclick: () => step(1) }, '›')),
-      h('div', { class: 'cal' }, ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w) => h('div', { class: 'cal-w' }, w)), cells),
-      h('div', { class: 'cal-key' },
-        h('span', {}, h('span', { class: 'mk insp' }), 'Report'),
-        h('span', {}, h('span', { class: 'mk missed' }), "Couldn't inspect"),
-        hasItems ? h('span', {}, h('span', { class: 'mk opened' }), 'Item opened') : null,
-        hasItems ? h('span', {}, h('span', { class: 'mk due' }), 'Item due') : null,
-        hasItems ? h('span', {}, h('span', { class: 'mk fixed' }), 'Item fixed') : null));
-  }
-
-  function paintDay() {
-    const e = view.day && days[view.day];
-    if (!view.day) return dayBox.replaceChildren();
-    const parts = [h('h3', { style: 'margin-top:0' }, new Date(view.day + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' }))];
-    if (!e) parts.push(h('p', { class: 'hint', style: 'margin:0' }, 'Nothing on file this day.'));
-    else {
-      if (e.reports.length) parts.push(h('ul', { class: 'list' }, e.reports.map(row)));
-      const group = (label, list) => { if (list.length) parts.push(h('div', { class: 'sub', style: 'margin-top:10px;font-weight:650' }, label), h('ul', { class: 'list' }, list.map((x) => itemRow(x, today)))); };
-      group('Items opened', e.opened);
-      group('Items fixed', e.fixed);
-      group('Items due', e.due);
-      group('Items still open at this inspection', e.seen);
-    }
-    dayBox.replaceChildren(h('div', { class: 'day-panel' }, parts));
-  }
-
-  function paintList() {
-    const tabs = h('div', { class: 'seg', style: 'margin-bottom:10px' },
-      segBtn(`Reports (${rows.length})`, view.tab === 'reports', '', () => setTab('reports')),
-      hasItems ? segBtn(`Action items (${items.length})`, view.tab === 'items', '', () => setTab('items')) : null);
-    let body;
-    if (view.tab === 'items') {
-      const open = items.filter((x) => !itemState(x, today).closed);
-      const closed = items.filter((x) => itemState(x, today).closed);
-      body = items.length
-        ? [open.length ? h('div', { class: 'sub', style: 'font-weight:650' }, `Open (${open.length})`) : h('p', { class: 'hint', style: 'margin:0' }, 'No open items.'),
-          open.length ? h('ul', { class: 'list' }, open.map((x) => itemRow(x, today, showDay))) : null,
-          closed.length ? h('div', { class: 'sub', style: 'font-weight:650;margin-top:12px' }, `Closed (${closed.length})`) : null,
-          closed.length ? h('ul', { class: 'list' }, closed.map((x) => itemRow(x, today, showDay))) : null]
-        : [h('p', { class: 'hint', style: 'margin:0' }, 'No action items on record here.')];
-    } else {
-      body = rows.length
-        ? [h('ul', { class: 'list' }, rows.map(row)),
-          h('p', { class: 'hint' }, 'A report still uploading shows up here once it\'s filed. Correct shows on the reports this phone signed; a report from another phone is corrected on that phone.')]
-        : [h('p', { class: 'hint', style: 'margin:0' }, site.history ? 'Nothing on file here yet.' : 'The history comes down the next time this phone has signal.')];
-    }
-    listBox.replaceChildren(tabs, ...body);
-  }
-
-  function setTab(t) {
-    view.tab = t;
-    try { kv.set('history_tab', t); } catch (e) { /* a convenience only */ }
-    paintList();
-  }
-
-  paintCal();
-  paintDay();
-  paintList();
+  let tab = 'reports';
+  try { tab = (await kv.get('history_tab')) || 'reports'; } catch (e) { /* the default */ }
+  const hv = historyView({
+    rows: site.history, items: site.items, today, tab,
+    row: (r) => historyRow(site, r, mine[r.key]),
+    onTab: (t) => { try { kv.set('history_tab', t); } catch (e) { /* a convenience only */ } },
+    hints: {
+      reports: 'A report still uploading shows up here once it\'s filed. Correct shows on the reports this phone signed; a report from another phone is corrected on that phone.',
+      empty: 'Nothing on file here yet.',
+      missing: 'The history comes down the next time this phone has signal.',
+    },
+  });
   $app.replaceChildren(
-    h('div', { class: 'card' }, h('h2', {}, `${site.name}: history`), calBox, dayBox),
-    h('div', { class: 'card' }, listBox),
+    h('div', { class: 'card' }, h('h2', {}, `${site.name}: history`), hv.cal),
+    h('div', { class: 'card' }, hv.list),
     h('button', { class: 'btn block', onclick: () => go({ name: 'home' }) }, 'Back to sites'));
 }
 

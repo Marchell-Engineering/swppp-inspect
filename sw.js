@@ -1,7 +1,7 @@
 // The offline layer: keeps a copy of the app on the phone so it opens with no signal. Bump VERSION with
 // every app change (tools/publish.sh does it), so phones pick up the new copy; the app then offers an
 // Update button on the sites screen, never in the middle of an inspection.
-const VERSION = 'v0.2.4-202611161030';
+const VERSION = 'v0.2.5-202611161525';
 const CACHE = 'swppp-inspect-' + VERSION;
 const SHELL = [
   './',
@@ -12,6 +12,8 @@ const SHELL = [
   'js/api.js',
   'js/bank.js',
   'js/checklist.js',
+  'js/dom.js',
+  'js/history.js',
   'js/media.js',
   'js/pdf.js',
   'js/settings.js',

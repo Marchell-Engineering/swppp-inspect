@@ -1,10 +1,14 @@
-// The action-item page a report email links to (Brandon, 10/22: ComplianceGo let the email's readers tick
-// items off with no account or app). The link's code (?t=) picks the site; the page lists its open items as
-// of now, and the reader marks one fixed with their name, a note and a photo if they like. That flags the
-// item for the next inspection to confirm on site; it doesn't close it (Brandon's pick, Att. D II.J.2).
-// It talks to the Google script the same way the app does (gas/Code.gs fixList / fixMark).
+// The page a report email links to (Brandon, 10/22: ComplianceGo let the email's readers tick items off with no
+// account or app; 11/16: "can you add the interactive history/calendar to the email?"). The link's code (?t=) picks
+// the site. The page lists its open items as of now, and the reader marks one fixed with their name, a note and a
+// photo if they like. That flags the item for the next inspection to confirm on site; it doesn't close it (Brandon's
+// pick, Att. D II.J.2). Under them, the site's History calendar and its Reports / Action items lists, drawn by the
+// app's own code (js/history.js), read-only: no Get the PDF (the script hands a PDF only to an inspector's code),
+// no Correct. It talks to the Google script the same way the app does (gas/Code.gs fixList / fixMark).
 
 import { BACKEND_URL } from './settings.js';
+import { h } from './dom.js';
+import { historyView, reportRow } from './history.js';
 
 const params = new URLSearchParams(location.search);
 const token = params.get('t') || '';
@@ -12,22 +16,6 @@ const local = ['localhost', '127.0.0.1'].includes(location.hostname);
 const backend = (local && params.get('backend')) || BACKEND_URL;
 const $app = document.getElementById('app');
 const $title = document.getElementById('title');
-
-function h(tag, attrs, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (v === null || v === undefined || v === false) continue;
-    if (k === 'class') el.className = v;
-    else if (k === 'value') el.value = v;
-    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
-    else el.setAttribute(k, v === true ? '' : v);
-  }
-  for (const kid of kids.flat(Infinity)) {
-    if (kid === null || kid === undefined || kid === false || kid === '') continue;
-    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  }
-  return el;
-}
 
 async function call(payload) {
   const r = await fetch(backend, {
@@ -66,6 +54,11 @@ async function shrink(file) {
 }
 
 let nameInput;
+let hist = null;     // { items, view } once the history has drawn
+
+const siteToday = (tz) => new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const savedTab = () => { try { return localStorage.getItem('swppp_fix_tab') || 'items'; } catch { return 'items'; } };
+const saveTab = (t) => { try { localStorage.setItem('swppp_fix_tab', t); } catch { /* not kept */ } };
 
 function itemCard(x) {
   const head = [
@@ -100,6 +93,8 @@ function itemCard(x) {
       const pic = photo.files && photo.files[0] ? await shrink(photo.files[0]) : '';
       const out = await call({ action: 'fix_mark', token, item_id: x.id, name, note: note.value, photo: pic });
       document.getElementById('item-' + x.id).replaceWith(itemCard({ ...x, reported: out.reported }));
+      const logged = hist && hist.items.find((it) => it.id === x.id);
+      if (logged) { logged.reported = out.reported; hist.view.repaint(); }
     } catch (e) {
       btn.disabled = false;
       btn.textContent = 'Mark fixed';
@@ -113,6 +108,25 @@ function itemCard(x) {
     btn, msg);
 }
 
+// the site's History calendar and lists, when the script sends them (one pushed before 11/16 sends open items only)
+function historyCards(out) {
+  if (!Array.isArray(out.history)) return [];
+  const items = Array.isArray(out.items_all) ? out.items_all : undefined;
+  const view = historyView({
+    rows: out.history, items, today: siteToday(out.site.tz), tab: savedTab(), onTab: saveTab,
+    row: (r) => reportRow(r),
+    hints: { empty: 'No reports on file here yet.' },
+  });
+  hist = { items: items || [], view };
+  return [
+    h('div', { class: 'card' },
+      h('h2', {}, 'Inspection history'),
+      h('p', { class: 'hint', style: 'margin-top:0' }, 'Tap a day to see what happened on it. The arrows step back through earlier months.'),
+      view.cal),
+    h('div', { class: 'card' }, view.list),
+  ];
+}
+
 async function load() {
   if (!token) {
     $app.replaceChildren(h('div', { class: 'banner red' }, 'This link is missing its code. Use the link in the report email.'));
@@ -121,17 +135,18 @@ async function load() {
   try {
     const out = await call({ action: 'fix_list', token });
     $title.textContent = out.site.name;
-    document.title = `Action Items - ${out.site.name}`;
+    document.title = `SWPPP - ${out.site.name}`;
     nameInput = h('input', { type: 'text', autocomplete: 'name', placeholder: 'First and last name', value: savedName() });
     const kids = [
       h('div', { class: 'card' },
         h('h2', {}, 'Open SWPPP action items'),
         h('p', { class: 'sub', style: 'margin-top:0' }, out.site.address || ''),
-        h('p', { class: 'hint' }, 'Mark an item fixed once the work is done. Marchell Engineering\'s inspector checks it on site at the next inspection and closes it then.'),
-        h('div', { class: 'field' }, h('label', {}, 'Your name'), nameInput)),
+        out.items.length ? h('p', { class: 'hint' }, 'Mark an item fixed once the work is done. Marchell Engineering\'s inspector checks it on site at the next inspection and closes it then.') : null,
+        out.items.length ? h('div', { class: 'field' }, h('label', {}, 'Your name'), nameInput) : null),
     ];
     if (!out.items.length) kids.push(h('div', { class: 'banner green' }, 'No open action items right now. Thank you!'));
     for (const x of out.items) kids.push(itemCard(x));
+    kids.push(...historyCards(out));
     $app.replaceChildren(...kids);
   } catch (e) {
     $app.replaceChildren(h('div', { class: 'banner red' }, e.message.includes('Failed to fetch') ? 'No connection. Try again once you have signal.' : e.message));
