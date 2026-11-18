@@ -8,7 +8,8 @@ import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL, shownSectio
 import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, exifGps, metres, SigPad } from './media.js';
 import { buildPdf } from './pdf.js';
 import { APP_VERSION } from './settings.js';
-import { SEEN, NOTES, WEATHER_PICKS, money, mapUrl, walkPdfName } from './bank.js';
+import { SEEN, NOTES, WEATHER_PICKS, DUMP_PICKS, money, mapUrl, walkPdfName, looseWalk, isLoose } from './bank.js';
+import { Recorder, supported as canRecord, closeStale, clipKey, extFor, fmtSecs, totalSecs } from './voice.js';
 import { h, segBtn } from './dom.js';
 import { historyView, reportRow } from './history.js';
 
@@ -25,6 +26,7 @@ let view = { name: 'boot' };
 let cur = null;          // the open inspection: { rec, R, site }
 let saveTimer = null;
 let swWaiting = null;
+let voiceRec = null;     // the voice recorder while a walk's Record is on (lives outside the cards, so a repaint keeps it)
 const uploadNote = {};   // report id -> latest upload message
 
 function toast(text, ms = 2600) {
@@ -49,7 +51,14 @@ const addDays = (iso, n) => { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDa
 // ---------------------------------------------------------------------------------------------
 // navigation (the phone's back button works through history)
 
+// leaving the walk's screen stops a recording; what was said is already saved
+function stopVoice() {
+  if (voiceRec && voiceRec.state === 'recording') voiceRec.stop();
+  voiceRec = null;
+}
+
 function go(v, replace = false) {
+  if (!(v.name === 'inspect' && view.name === 'inspect' && v.id === view.id)) stopVoice();
   view = v;
   if (replace) history.replaceState(v, '');
   else history.pushState(v, '');
@@ -57,6 +66,7 @@ function go(v, replace = false) {
 }
 
 window.addEventListener('popstate', (e) => {
+  stopVoice();
   if (cur) saveNow();
   view = e.state || { name: 'home' };
   render();
@@ -387,7 +397,8 @@ async function startBankWalk(site) {
     carried: [],
     items: [],
     billed: (d.items || []).map((x) => ({ id: x.id, area: x.area || '', work: x.work || '', billed: x.billed === undefined ? null : x.billed, seen: null, note: '' })),
-    walk: { met: '', phone_with: '', weather: '', pct: '', ...Object.fromEntries(NOTES.map((n) => [n.id, ''])) },
+    walk: { met: '', phone_with: '', weather: '', pct: '', ...Object.fromEntries(NOTES.map((n) => [n.id, ''])), ...(looseWalk(cfg.inspector) ? { form: 'loose', dump: '' } : {}) },
+    voice: [],
     photos: [],
     signature: null,
     vehicle: null,
@@ -468,6 +479,7 @@ async function renderInspect(id) {
   const cfg = await kv.get('config');
   const site = cfg.sites.find((s) => s.id === rec.site_id) || rec.data.site;
   cur = { rec, R: rec.data, site, pad: null };
+  if (closeStale(rec.data)) await saveNow();
   $title.textContent = (rec.data.revises ? 'Correction: ' : '') + rec.data.site.name;
   $back.hidden = false;
   $app.replaceChildren(...cards().map((c) => c.build()));
@@ -480,6 +492,17 @@ async function renderInspect(id) {
 function cards() {
   const { R } = cur;
   const fix = R.revises ? [{ id: 'fix', label: 'Correction', build: correctionCard, status: () => (R.revision_reason.trim() ? 'done' : 'warn') }] : [];
+  if (R.kind === 'bank' && isLoose(R)) {
+    // Brandon's own walks (11/17): one place to dump notes, a record button, the draw's items for reference
+    return [
+      ...fix,
+      { id: 'visit', label: 'Visit', build: visitCard, status: () => (R.walk.met.trim() ? 'done' : '') },
+      { id: 'notes', label: 'Notes', build: dumpCard, status: () => (R.walk.dump.trim() || (R.voice || []).length ? 'done' : '') },
+      { id: 'billed', label: 'Draw items', build: billedCard, status: () => (R.billed.length && R.billed.every((x) => x.seen) ? 'done' : '') },
+      { id: 'photos', label: 'Photos', build: photosCard, status: () => (R.photos.length ? 'done' : '') },
+      { id: 'finish', label: 'Sign', build: finishCard, status: () => '' },
+    ];
+  }
   if (R.kind === 'bank') {
     return [
       ...fix,
@@ -1041,7 +1064,9 @@ function pickPhotos(ref, caption, done) {
 function photosCard() {
   const bank = cur.R.kind === 'bank';
   return card('photos', 'Site photos',
-    h('p', { class: 'hint', style: 'margin-top:0' }, bank
+    h('p', { class: 'hint', style: 'margin-top:0' }, bank && isLoose(cur.R)
+      ? "Optional. Photos from the phone's own camera reach the Dump folder by themselves on home wifi, so there is no need to add them here."
+      : bank
       ? 'Wide shots: each building face, the street frontage, and anything else worth showing. Photos of a billed item go with it above.'
       : 'General photos of the site and the BMPs. Problem photos go with their question or action item above.'),
     photoWidget('site', 'Site'));
@@ -1196,10 +1221,13 @@ function billedCard() {
   const { R } = cur;
   if (!R.billed.length) {
     return card('billed', 'Billed this draw',
-      h('p', { class: 'hint', style: 'margin-top:0' }, 'No billed items were loaded for this draw. Note what you saw under Building and unit work.'));
+      h('p', { class: 'hint', style: 'margin-top:0' }, `No billed items were loaded for this draw. Note what you saw ${isLoose(R) ? 'in the notes' : 'under Building and unit work'}.`));
   }
-  return card('billed', 'Billed this draw',
-    h('p', { class: 'hint', style: 'margin-top:0' }, 'Check each item this draw bills. Mark it Done only if you saw the work. A photo of each one.'),
+  const loose = isLoose(R);
+  return card('billed', loose ? 'What this draw bills' : 'Billed this draw',
+    h('p', { class: 'hint', style: 'margin-top:0' }, loose
+      ? 'For reference. A tap is optional; say what you saw in the notes or the recording.'
+      : 'Check each item this draw bills. Mark it Done only if you saw the work. A photo of each one.'),
     R.billed.map((x) => {
       const box = h('div', { class: 'item' + (x.seen === 'done' ? ' closed' : x.seen === 'not' ? ' late' : '') },
         h('div', { class: 'row' }, h('span', { class: 't grow' }, [x.area, x.work].filter(Boolean).join(': ')), x.billed !== null ? h('span', { class: 'chip' }, money(x.billed)) : null),
@@ -1208,6 +1236,11 @@ function billedCard() {
           save();
           repaint(['billed']);
         }))));
+      if (loose) {
+        // no boxes on the loose form: a tap can be taken back, and the notes carry the rest
+        if (x.seen) box.append(h('button', { class: 'btn sm ghost', style: 'margin-top:6px', onclick: () => { x.seen = null; save(); repaint(['billed']); } }, 'Clear tap'));
+        return box;
+      }
       if (x.seen && x.seen !== 'done') {
         box.append(field(x.seen === 'unseen' ? "Why you couldn't see it (required)" : 'What you saw (required)',
           h('textarea', { value: x.note, placeholder: x.seen === 'unseen' ? 'e.g. Unit locked, no answer from Nicole' : 'e.g. Front and side primed, back not started', oninput: (e) => { x.note = e.target.value; save(); } })));
@@ -1232,12 +1265,68 @@ function notesCard() {
       h('p', { class: 'hint', style: 'margin:4px 0 0' }, "Your read only. Brandon sets the report's percent observed.")));
 }
 
+// the loose form's notes (Brandon, 11/17): one box to dump into, and a record button
+function dumpCard() {
+  const { R } = cur;
+  const w = R.walk;
+  const ta = h('textarea', { class: 'dump', value: w.dump, placeholder: 'Whatever comes up: what you see, what Scott says, change orders, schedule, the next 30 days, questions for later…', oninput: (e) => { w.dump = e.target.value; save(); } });
+  // when a walk began on the boxed form, its box text stays visible (a correction of an older walk)
+  const old = NOTES.filter((n) => (w[n.id] || '').trim());
+  return card('notes', 'Notes',
+    voiceBox(),
+    field('Notes', ta, true, pickRow(DUMP_PICKS, ta, 'dump', w),
+      h('p', { class: 'hint', style: 'margin:4px 0 0' }, "Any order, any length. The keyboard's microphone types as you talk, too.")),
+    old.length ? h('div', { class: 'item' }, h('div', { class: 'sub' }, 'From the boxes this walk had before'),
+      old.map((n) => h('p', { style: 'margin:6px 0 0' }, h('strong', {}, n.title + ': '), w[n.id]))) : null);
+}
+
+// Record / Stop, the clips so far, and what the phone said if it refused
+function voiceBox() {
+  const { R, rec } = cur;
+  const wrap = h('div', { class: 'voice', id: 'voice-box' });
+  const paint = () => {
+    const st = voiceRec ? voiceRec.state : 'idle';
+    const on = st === 'recording' || st === 'starting';
+    const btn = h('button', { class: 'btn block big ' + (on ? 'rec-on' : 'primary'), id: 'voice-btn', disabled: !canRecord() || st === 'starting' },
+      !canRecord() ? 'This phone can\'t record here' : st === 'starting' ? 'Starting…' : on ? `■ Stop  ${fmtSecs(totalSecs(R))}` : (R.voice || []).length ? '● Record more' : '● Record');
+    btn.addEventListener('click', async () => {
+      if (voiceRec && voiceRec.state === 'recording') {
+        await voiceRec.stop();
+        return;
+      }
+      voiceRec = new Recorder({ recId: rec.id, R, save: () => saveNow(), onchange: () => {
+        // whichever copy of the box is on screen now (a repaint of the card makes a new one)
+        const el = document.getElementById('voice-box');
+        if (el) el.replaceWith(voiceBox());
+        paintJump();
+      } });
+      await voiceRec.start();
+    });
+    const clips = (R.voice || []).filter((c) => c.bytes || c.open);
+    const msg = st === 'stopped-by-phone' ? 'The recording stopped when the phone took the microphone. What was said is saved; tap Record to go on.'
+      : st === 'denied' ? 'The microphone is blocked for this app. Allow it in the browser\'s site settings, then tap Record.'
+      : st === 'error' ? `Couldn't start the microphone${voiceRec && voiceRec.msg ? ': ' + voiceRec.msg : ''}.` : '';
+    wrap.replaceChildren(btn,
+      msg ? h('p', { class: 'hint warn' }, msg) : '',
+      clips.length ? h('p', { class: 'hint' }, `${clips.length} clip${clips.length > 1 ? 's' : ''}, ${fmtSecs(totalSecs(R))} in all. Kept with the walk; the laptop types them up when they're filed.`)
+        : h('p', { class: 'hint' }, 'Talk as you walk. It keeps the recording and the laptop types it up once the walk is filed. Turn it on for your own notes; it hears whoever is talking.'));
+  };
+  paint();
+  return wrap;
+}
+
 // --- finish and sign ----------------------------------------------------------------------------
 
 function missingAll() {
   const { R } = cur;
   const m = [];
   if (R.revises && !R.revision_reason.trim()) m.push(['fix', 'Say what the correction changes and why']);
+  if (R.kind === 'bank' && isLoose(R)) {
+    // only that something was written or said: the draw items and the boxes are optional on this form
+    if (!R.walk.dump.trim() && !(R.voice || []).length) m.push(['notes', 'Write or record your notes']);
+    if (asksVehicle(R) && !R.vehicle) m.push(['finish', 'Say whose vehicle you drove']);
+    return m;
+  }
   if (R.kind === 'bank') {
     if (!R.walk.met.trim()) m.push(['visit', 'Say who you met on site (or tap "Nobody on site")']);
     const open = R.billed.filter((x) => !x.seen).length;
@@ -1346,6 +1435,11 @@ async function finish(btn) {
   btn.disabled = true;
   btn.textContent = 'Making the PDF…';
   try {
+    // signing with the recorder on stops it; everything said so far goes with the walk
+    if (voiceRec && voiceRec.state === 'recording') await voiceRec.stop();
+    // voice clips (a bank walk): named by number and the time they started, so the laptop's transcript reads in order
+    R.voice = (R.voice || []).filter((c) => c.bytes);
+    for (const c of R.voice) c.file = `Voice note ${String(c.n).padStart(2, '0')} (${shortTime(c.started_ms, R.tz).replace(':', '.')}).${extFor(c.mime)}`;
     if (R.kind !== 'bank' && !R.weather.forecast && navigator.onLine) {
       const wx = await pullWeather(cur.site, 10000).catch(() => null);
       if (wx && wx.forecast) applyWeather(wx);
@@ -1384,6 +1478,7 @@ async function finish(btn) {
     const safe = (s) => (s || 'Photo').replace(/[\\/:*?"<>|#%]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60);
     rec.files = [
       ...R.photos.map((p, i) => ({ key: `photo:${rec.id}:${p.id}`, name: `Photo ${String(i + 1).padStart(2, '0')} - ${safe(p.caption)}.jpg`, kind: 'photo', mime: 'image/jpeg' })),
+      ...R.voice.map((c) => ({ key: clipKey(rec.id, c.id), name: c.file, kind: 'audio', mime: c.mime })),
       { key: `sig:${rec.id}`, name: 'Signature.png', kind: 'signature', mime: 'image/png' },
       { key: `pdf:${rec.id}`, name: pdfName, kind: 'pdf', mime: 'application/pdf' },
     ];
@@ -1561,6 +1656,15 @@ async function startCorrection(orig) {
     photos.push(p);
   }
   R.photos = photos;
+  // so do the voice clips (the laptop's transcript of the original stays in its own folder)
+  const clips = [];
+  for (const c of R.voice || []) {
+    const b = await blobs.get(clipKey(latest.id, c.id));
+    if (!b) continue;
+    await blobs.put(clipKey(id, c.id), b);
+    clips.push(c);
+  }
+  R.voice = clips;
   const now = Date.now();
   await reports.put({ id, site_id: latest.site_id, status: 'draft', created_ms: now, updated_ms: now, data: R, files: [],
     meta: { pdf_name: latest.meta.pdf_name, pdf_name_final: latest.meta.pdf_name_final } });

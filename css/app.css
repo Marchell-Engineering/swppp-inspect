@@ -237,3 +237,9 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--blue-2); ou
 .cal-key > span { display: inline-flex; align-items: center; gap: 4px; }
 .day-panel { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .hist-item { align-items: flex-start !important; }
+
+/* the bank walk's notes dump and voice recorder (11/17) */
+textarea.dump { min-height: 220px; }
+.voice { margin: 0 0 12px; }
+.btn.rec-on { background: var(--red); color: #fff; border-color: var(--red); }
+.hint.warn { color: var(--red); }

@@ -50,3 +50,18 @@ export function walkPdfName(template, R) {
   if (!pr) name = name.replace(/PR#\{pr\}\s*/, '');
   return name.replace('{pr}', pr).replace('{name}', R.site.name).replace('{mmddyy}', `${m}.${d}.${y.slice(2)}`).replace('{date}', R.date);
 }
+
+// The loose form (Brandon, 11/17): "since there's not like a formal template that we provide, like it goes into the
+// Excel spreadsheet, I'd rather have the form be a little more loosey-goosey, basically a place for me to dump in
+// notes, because I'm talking to these contractors and they're bringing up different disparate things, and I don't
+// want to be clicking into a bunch of random boxes." One notes box and a record button; the draw's items are a
+// reference list with optional taps, and only something written or said is required to sign.
+// Claude's pick (his to change): every walker but a QSP delegate gets it, so Brandon's walks are loose and Blake's
+// keep the prompts, which help someone who doesn't write the PACS report himself. Keyed on the inspector's role,
+// which already reaches the phone, so it needs no script push. The walk keeps its form (`walk.form`), so a
+// correction or an older boxed walk still reads the way it was written.
+export const looseWalk = (inspector) => !!inspector && inspector.role !== 'delegate';
+export const isLoose = (R) => !!(R && R.walk && R.walk.form === 'loose');
+
+// the picks under the notes box: a tap adds the line, nothing more
+export const DUMP_PICKS = ['Nobody on site', 'No workers on site', 'No change orders reported', 'On schedule, no delays reported', 'No stop-work notice posted'];

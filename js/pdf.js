@@ -5,7 +5,8 @@
 
 import { TYPES, ANSWER_LABEL, NAL, MISSED_REASONS, shownSections, shownQuestions } from './checklist.js';
 import { fmtLocal, typeReasons } from './weather.js';
-import { SEEN_LABEL, NOTES, money, mapUrl } from './bank.js';
+import { SEEN_LABEL, NOTES, money, mapUrl, isLoose } from './bank.js';
+import { fmtSecs } from './voice.js';
 
 const BLUE = '#24408e';
 const INK = '#1b1f2a';
@@ -579,7 +580,7 @@ function billedBlock(r, photoNumbers) {
   const out = [bar('Billed This Draw')];
   const b = r.billed || [];
   if (!b.length) {
-    out.push({ text: 'No billed items were loaded for this draw; see Building and unit work.', color: MUTED });
+    out.push({ text: `No billed items were loaded for this draw; see ${isLoose(r) ? 'the notes' : 'Building and unit work'}.`, color: MUTED });
     return out;
   }
   const total = b.reduce((t, x) => t + (Number(x.billed) || 0), 0);
@@ -594,7 +595,7 @@ function billedBlock(r, photoNumbers) {
           { text: x.area || '', bold: true },
           x.work || '',
           { text: money(x.billed), alignment: 'right' },
-          { text: SEEN_LABEL[x.seen] || '--', bold: true, color: tone(x.seen) },
+          { text: SEEN_LABEL[x.seen] || (isLoose(r) ? 'not marked' : '--'), bold: !!x.seen || !isLoose(r), color: x.seen ? tone(x.seen) : MUTED },
           x.note || '',
           { text: (photoNumbers[x.id] || []).map((n) => `Photo ${n}`).join(', '), fontSize: 7.5 },
         ]),
@@ -608,7 +609,36 @@ function billedBlock(r, photoNumbers) {
   return out;
 }
 
+// the loose form (11/17): the notes as written, line for line, and the voice clips by name; the transcript is made on
+// the laptop after filing, so this PDF only says the clips exist. Blank stays blank, never "none".
+function looseBlock(r) {
+  const w = r.walk || {};
+  const clips = (r.voice || []).filter((c) => c.bytes);
+  const secs = clips.reduce((t, c) => t + (c.secs || 0), 0);
+  const old = NOTES.filter((n) => (w[n.id] || '').trim());
+  return [
+    bar('Site Visit'),
+    kvRows([
+      ['Met on site', w.met || 'not recorded'],
+      ['Talked with by phone', w.phone_with],
+      ['Weather and ground', w.weather],
+    ].filter(([a, b]) => b || a === 'Met on site')),
+    bar('Notes'),
+    (w.dump || '').trim() ? { text: w.dump.trim(), preserveLeadingSpaces: true } : { text: 'No written notes.', color: MUTED },
+    ...(old.length ? [{ text: 'From the boxes this walk began with:', color: MUTED, margin: [0, 8, 0, 2] }, kvRows(old.map((n) => [n.title, w[n.id]]))] : []),
+    ...(clips.length ? [
+      bar('Voice Notes'),
+      { text: `${clips.length} recording${clips.length > 1 ? 's' : ''}, ${fmtSecs(secs)} in all, filed with the walk data. The typed transcript is made on the laptop after filing and sits beside them.`, color: MUTED },
+      { ul: clips.map((c) => `${c.file || `Voice note ${c.n}`}  (${fmtSecs(c.secs)})`), fontSize: 8.5, margin: [0, 4, 0, 0] },
+    ] : []),
+    w.pct !== '' && w.pct !== undefined && w.pct !== null
+      ? { text: [{ text: "Walker's guess at percent complete: ", color: MUTED }, { text: `${w.pct}%`, bold: true }], margin: [0, 8, 0, 0] }
+      : '',
+  ];
+}
+
 function walkBlock(r) {
+  if (isLoose(r)) return looseBlock(r);
   const w = r.walk || {};
   return [
     bar('Site Visit'),
@@ -672,8 +702,8 @@ async function buildBankPdf(r, { logo, sig, loadPhoto }) {
       { text: `${pr}Bank Walk Field Notes${r.revision ? ` (Revision ${r.revision})` : ''}`, alignment: 'center', bold: true, fontSize: 15, color: BLUE, margin: [0, 12, 0, 0] },
       { text: 'Notes from the site walk, for the PACS progress report. Not the report itself.', alignment: 'center', fontSize: 8, color: MUTED, margin: [0, 2, 0, 0] },
       ...drawBlock(r),
-      ...billedBlock(r, photos.numbers),
-      ...walkBlock(r),
+      // the loose form leads with the notes; the draw's items follow as the reference they were on the phone
+      ...(isLoose(r) ? [...walkBlock(r), ...billedBlock(r, photos.numbers)] : [...billedBlock(r, photos.numbers), ...walkBlock(r)]),
       ...correctionBlock(r),
       ...walkSignature(r, sig),
       ...photos.blocks,
