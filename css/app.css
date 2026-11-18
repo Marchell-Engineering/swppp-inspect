@@ -243,3 +243,8 @@ textarea.dump { min-height: 220px; }
 .voice { margin: 0 0 12px; }
 .btn.rec-on { background: var(--red); color: #fff; border-color: var(--red); }
 .hint.warn { color: var(--red); }
+
+/* a billed line's progress: the share of its budget billed to date (11/17) */
+.prog { margin-top: 6px; }
+.prog .bar { height: 6px; border-radius: 3px; background: var(--bg); overflow: hidden; }
+.prog .bar span { display: block; height: 100%; background: var(--blue); }

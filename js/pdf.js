@@ -5,7 +5,7 @@
 
 import { TYPES, ANSWER_LABEL, NAL, MISSED_REASONS, shownSections, shownQuestions } from './checklist.js';
 import { fmtLocal, typeReasons } from './weather.js';
-import { SEEN_LABEL, NOTES, money, mapUrl, isLoose } from './bank.js';
+import { SEEN_LABEL, NOTES, money, mapUrl, isLoose, seenGood } from './bank.js';
 import { fmtSecs } from './voice.js';
 
 const BLUE = '#24408e';
@@ -584,28 +584,42 @@ function billedBlock(r, photoNumbers) {
     return out;
   }
   const total = b.reduce((t, x) => t + (Number(x.billed) || 0), 0);
-  const tone = (s) => (s === 'done' ? INK : s === 'not' ? RED : '#8a5a00');
+  const tone = (s) => (seenGood(s) ? INK : s === 'not' || s === 'behind' ? RED : '#8a5a00');
+  // the whole line's progress, billed to date of its budget, before and after this draw (11/17)
+  const prog = (x) => {
+    if (x.budget === null || x.budget === undefined || x.to_date === null || x.to_date === undefined || !Number(x.budget)) return { text: '--', color: MUTED };
+    const p = (v) => `${Math.round((100 * v) / x.budget)}%`;
+    return { text: [{ text: p(x.to_date), bold: true }, { text: ` (was ${p(x.to_date - (Number(x.billed) || 0))})\nof ${money(x.budget)}`, fontSize: 7.5, color: MUTED }] };
+  };
+  const nw = r.not_walked || [];
+  const nwTotal = nw.reduce((t, x) => t + (Number(x.billed) || 0), 0);
   out.push({
     table: {
       headerRows: 1,
-      widths: [54, 110, 56, 50, '*', 44],
+      widths: [44, 92, 54, 62, 60, '*', 36],
       body: [
-        ['Area', 'Work billed', 'Billed', 'Seen', 'What the walker saw', 'Photos'].map((t) => ({ text: t, color: MUTED, fontSize: 8 })),
+        ['Area', 'Work billed', 'This draw', 'Billed to date', 'Seen', 'What the walker saw', 'Photos'].map((t) => ({ text: t, color: MUTED, fontSize: 8 })),
         ...b.map((x) => [
           { text: x.area || '', bold: true },
-          x.work || '',
+          x.about ? { text: [x.work || '', { text: `\n${x.about}`, fontSize: 7.5, color: MUTED }] } : (x.work || ''),
           { text: money(x.billed), alignment: 'right' },
+          prog(x),
           { text: SEEN_LABEL[x.seen] || (isLoose(r) ? 'not marked' : '--'), bold: !!x.seen || !isLoose(r), color: x.seen ? tone(x.seen) : MUTED },
           x.note || '',
           { text: (photoNumbers[x.id] || []).map((n) => `Photo ${n}`).join(', '), fontSize: 7.5 },
         ]),
-        [{ text: 'Total', bold: true }, '', { text: money(total), alignment: 'right', bold: true }, '', '', ''],
+        [{ text: nw.length ? 'Walked' : 'Total', bold: true }, '', { text: money(total), alignment: 'right', bold: true }, '', '', '', ''],
       ],
       dontBreakRows: true,
     },
     layout: grid,
     fontSize: 8.5,
   });
+  // services and temporary items the draw also bills, not walked (Brandon 11/17), so the page still adds up
+  if (nw.length) {
+    out.push({ text: [{ text: 'Also billed, not walked (services and temporary items): ', color: MUTED },
+      nw.map((x) => `${x.work} ${money(x.billed)}`).join('; '), { text: `. Draw total ${money(total + nwTotal)}.`, color: MUTED }], fontSize: 8, margin: [0, 4, 0, 0] });
+  }
   return out;
 }
 

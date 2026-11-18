@@ -6,14 +6,30 @@
 // The note boxes follow the PACS report (the Farroll Word report and the Emerald / Del Rio Comments tab) and
 // the walk sheet that came before this (pacs-pr's assets/field-inspection-form.html).
 
-// what the walker saw of a billed item; anything but Done asks what they saw
+// what the walker saw of a billed item, against the billing (Brandon, 11/17: "the done button is kind of misleading.
+// Does 'done' mean just that? Draws amount is done? Because the overall budget item can still be very much not
+// done"). The mark is about this draw's billing: is the work it pays for there? How far along the whole line is shows
+// beside it as the percent billed to date (progressText). Anything but Matches asks what they saw on the boxed form.
 export const SEEN = [
-  { id: 'done', label: 'Done', tone: 'good' },
-  { id: 'partly', label: 'Partly', tone: '' },
-  { id: 'not', label: 'Not done', tone: 'bad' },
+  { id: 'ok', label: 'Matches billing', tone: 'good' },
+  { id: 'behind', label: 'Looks behind', tone: 'bad' },
   { id: 'unseen', label: "Couldn't see", tone: '' },
 ];
-export const SEEN_LABEL = Object.fromEntries(SEEN.map((x) => [x.id, x.label]));
+// walks marked before 11/17 kept the old words
+export const SEEN_LABEL = { done: 'Done', partly: 'Partly', not: 'Not done', ...Object.fromEntries(SEEN.map((x) => [x.id, x.label])) };
+export const seenGood = (s) => s === 'ok' || s === 'done';
+
+// "31% of $1.51M billed to date (24% before this draw)": the whole budget line, from the draw package (`budget` and
+// `to_date` on the item, this draw included). Blank when the package didn't give them.
+export function progressText(x) {
+  if (x.budget === null || x.budget === undefined || x.to_date === null || x.to_date === undefined) return '';
+  const b = Number(x.budget);
+  const t = Number(x.to_date);
+  if (!b) return '';
+  const pct = (v) => `${Math.round(v)}%`;
+  const short = b >= 1e6 ? `$${(b / 1e6).toFixed(2)}M` : '$' + Math.round(b).toLocaleString('en-US');
+  return `${pct((100 * t) / b)} of ${short} billed to date (${pct((100 * (t - (Number(x.billed) || 0))) / b)} before this draw)`;
+}
 
 export const NOTES = [
   { id: 'site_work', title: 'Site work', hint: 'Outside the buildings: paving, walks, fences, landscaping, utilities.', picks: ['No site work this period'] },

@@ -8,7 +8,7 @@ import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL, shownSectio
 import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, exifGps, metres, SigPad } from './media.js';
 import { buildPdf } from './pdf.js';
 import { APP_VERSION } from './settings.js';
-import { SEEN, NOTES, WEATHER_PICKS, DUMP_PICKS, money, mapUrl, walkPdfName, looseWalk, isLoose } from './bank.js';
+import { SEEN, NOTES, WEATHER_PICKS, DUMP_PICKS, money, mapUrl, walkPdfName, looseWalk, isLoose, seenGood, progressText } from './bank.js';
 import { Recorder, supported as canRecord, closeStale, clipKey, extFor, fmtSecs, totalSecs } from './voice.js';
 import { h, segBtn } from './dom.js';
 import { historyView, reportRow } from './history.js';
@@ -396,7 +396,14 @@ async function startBankWalk(site) {
     notes: {},
     carried: [],
     items: [],
-    billed: (d.items || []).map((x) => ({ id: x.id, area: x.area || '', work: x.work || '', billed: x.billed === undefined ? null : x.billed, seen: null, note: '' })),
+    billed: (d.items || []).map((x) => ({
+      id: x.id, area: x.area || '', work: x.work || '', billed: x.billed === undefined ? null : x.billed,
+      budget: x.budget === undefined ? null : x.budget, to_date: x.to_date === undefined ? null : x.to_date, about: x.about || '',
+      seen: null, note: '',
+    })),
+    // the draw's lines not walked (services and temporary items, Brandon 11/17: "don't include any of the soft cost
+    // stuff"): kept so the PDF still adds up to the draw
+    not_walked: (d.not_walked || []).map((x) => ({ work: x.work || '', billed: x.billed === undefined ? null : x.billed })),
     walk: { met: '', phone_with: '', weather: '', pct: '', ...Object.fromEntries(NOTES.map((n) => [n.id, ''])), ...(looseWalk(cfg.inspector) ? { form: 'loose', dump: '' } : {}) },
     voice: [],
     photos: [],
@@ -1213,7 +1220,7 @@ function visitCard() {
 
 function billedStatus() {
   const b = cur.R.billed;
-  if (b.some((x) => x.seen && x.seen !== 'done' && !x.note.trim())) return 'warn';
+  if (b.some((x) => x.seen && !seenGood(x.seen) && !x.note.trim())) return 'warn';
   return b.every((x) => x.seen) ? 'done' : '';
 }
 
@@ -1227,10 +1234,13 @@ function billedCard() {
   return card('billed', loose ? 'What this draw bills' : 'Billed this draw',
     h('p', { class: 'hint', style: 'margin-top:0' }, loose
       ? 'For reference. A tap is optional; say what you saw in the notes or the recording.'
-      : 'Check each item this draw bills. Mark it Done only if you saw the work. A photo of each one.'),
+      : 'Check each item this draw bills: is the work it pays for there? The bar is how much of the whole line is billed so far. A photo of each one.'),
     R.billed.map((x) => {
-      const box = h('div', { class: 'item' + (x.seen === 'done' ? ' closed' : x.seen === 'not' ? ' late' : '') },
-        h('div', { class: 'row' }, h('span', { class: 't grow' }, [x.area, x.work].filter(Boolean).join(': ')), x.billed !== null ? h('span', { class: 'chip' }, money(x.billed)) : null),
+      const prog = progressText(x);
+      const box = h('div', { class: 'item' + (seenGood(x.seen) ? ' closed' : x.seen === 'behind' || x.seen === 'not' ? ' late' : '') },
+        h('div', { class: 'row' }, h('span', { class: 't grow' }, [x.area, x.work].filter(Boolean).join(': ')), x.billed !== null ? h('span', { class: 'chip' }, money(x.billed) + ' this draw') : null),
+        x.about ? h('div', { class: 'sub' }, x.about) : null,
+        prog ? h('div', { class: 'prog' }, h('div', { class: 'bar' }, h('span', { style: `width:${Math.min(100, Math.max(0, (100 * x.to_date) / x.budget))}%` })), h('div', { class: 'sub' }, prog)) : null,
         h('div', { class: 'seg', style: 'margin-top:10px' }, SEEN.map((o) => segBtn(o.label, x.seen === o.id, o.tone, () => {
           x.seen = o.id;
           save();
@@ -1241,10 +1251,10 @@ function billedCard() {
         if (x.seen) box.append(h('button', { class: 'btn sm ghost', style: 'margin-top:6px', onclick: () => { x.seen = null; save(); repaint(['billed']); } }, 'Clear tap'));
         return box;
       }
-      if (x.seen && x.seen !== 'done') {
+      if (x.seen && !seenGood(x.seen)) {
         box.append(field(x.seen === 'unseen' ? "Why you couldn't see it (required)" : 'What you saw (required)',
           h('textarea', { value: x.note, placeholder: x.seen === 'unseen' ? 'e.g. Unit locked, no answer from Nicole' : 'e.g. Front and side primed, back not started', oninput: (e) => { x.note = e.target.value; save(); } })));
-      } else if (x.seen === 'done') {
+      } else if (seenGood(x.seen)) {
         box.append(field('Notes', h('input', { type: 'text', value: x.note, oninput: (e) => { x.note = e.target.value; save(); } }), true));
       }
       box.append(photoWidget('billed:' + x.id, [x.area, x.work].filter(Boolean).join(' ')));
@@ -1331,8 +1341,8 @@ function missingAll() {
     if (!R.walk.met.trim()) m.push(['visit', 'Say who you met on site (or tap "Nobody on site")']);
     const open = R.billed.filter((x) => !x.seen).length;
     if (open) m.push(['billed', `Billed items: ${open} not checked yet`]);
-    const noNote = R.billed.filter((x) => x.seen && x.seen !== 'done' && !x.note.trim()).length;
-    if (noNote) m.push(['billed', `Billed items: say what you saw on ${noNote === 1 ? 'the one not done' : `the ${noNote} not done`}`]);
+    const noNote = R.billed.filter((x) => x.seen && !seenGood(x.seen) && !x.note.trim()).length;
+    if (noNote) m.push(['billed', `Billed items: say what you saw on ${noNote === 1 ? "the one that doesn't match" : `the ${noNote} that don't match`}`]);
     if (asksVehicle(R) && !R.vehicle) m.push(['finish', 'Say whose vehicle you drove']);
     return m;
   }
