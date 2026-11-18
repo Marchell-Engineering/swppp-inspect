@@ -1294,10 +1294,10 @@ function voiceBox() {
         await voiceRec.stop();
         return;
       }
-      voiceRec = new Recorder({ recId: rec.id, R, save: () => saveNow(), onchange: () => {
+      voiceRec = new Recorder({ recId: rec.id, R, save: () => { rec.updated_ms = Date.now(); return reports.put(rec); }, onchange: () => {
         // whichever copy of the box is on screen now (a repaint of the card makes a new one)
         const el = document.getElementById('voice-box');
-        if (el) el.replaceWith(voiceBox());
+        if (el && cur && cur.R === R) el.replaceWith(voiceBox());
         paintJump();
       } });
       await voiceRec.start();

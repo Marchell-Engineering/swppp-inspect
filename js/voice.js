@@ -17,6 +17,8 @@
 import { blobs, uid } from './store.js';
 
 export const CLIP_MS = 4 * 60e3;
+// a test on this machine can shorten the clips (window.__voiceClipMs); a phone never can
+const clipMs = () => (['localhost', '127.0.0.1'].includes(location.hostname) && window.__voiceClipMs) || CLIP_MS;
 const SLICE_MS = 10e3;
 const BITRATE = 24000;   // mono speech: about 180 kB a minute
 
@@ -54,7 +56,8 @@ export function closeStale(R) {
   return changed;
 }
 
-// One recording session. opts: { recId, R, save(), onchange(state) }. state: 'idle' | 'starting' | 'recording'
+// One recording session. opts: { recId, R, save(), onchange(state) }. save() writes the walk the recorder started
+// with, whatever screen is showing by then (leaving the walk stops it, and the last piece lands after that). state: 'idle' | 'starting' | 'recording'
 // | 'stopped-by-phone' | 'denied' | 'error'.
 export class Recorder {
   constructor(opts) {
@@ -124,7 +127,7 @@ export class Recorder {
     };
     mr.start(SLICE_MS);
     clearTimeout(this.rollTimer);
-    this.rollTimer = setTimeout(() => this.roll(), CLIP_MS);
+    this.rollTimer = setTimeout(() => this.roll(), clipMs());
   }
 
   // close this clip and start the next on the same microphone
@@ -166,7 +169,7 @@ export class Recorder {
   }
 }
 
-// all clips' total length
+// all clips' total length, the one being recorded counted to this second
 export function totalSecs(R) {
-  return (R.voice || []).reduce((t, c) => t + (c.secs || 0), 0);
+  return (R.voice || []).reduce((t, c) => t + (c.open ? Math.max(c.secs || 0, (Date.now() - c.started_ms) / 1000) : (c.secs || 0)), 0);
 }
