@@ -234,7 +234,10 @@ function siteInfoBlock(r) {
 
 function samplingBlock(r) {
   const sm = r.sampling;
-  if (!sm) return [];
+  // Only when the inspector answered Yes to samples. Opening the Sampling card and then answering No leaves an
+  // empty r.sampling behind, which printed a log with "Sampler" and blank "calibrated --" lines on a report that
+  // took no samples (Blake's Surf Thru 11/18; Brandon 11/19: "Does this mean Blake took samples?").
+  if (!sm || (r.answers || {}).g_samples !== 'yes') return [];
   const tz = r.tz;
   const flagPh = (v) => v !== '' && v !== null && (Number(v) < NAL.ph_low || Number(v) > NAL.ph_high);
   const flagNtu = (v) => v !== '' && v !== null && Number(v) > NAL.ntu;
