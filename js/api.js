@@ -55,7 +55,7 @@ async function request(url, payload, timeoutMs) {
 }
 
 // What this app version can do, so the script holds back sites an older phone would mishandle (Code.gs configFor)
-const CAN = ['bank', 'history', 'items'];
+const CAN = ['bank', 'history', 'items', 'qspfix'];
 
 // Sign in with an inspector code; returns and caches { inspector, sites, logo }.
 export async function signIn(code) {
@@ -85,6 +85,19 @@ export async function historyPdf(siteId, pdf) {
   const out = await call({ action: 'history_pdf', code, site_id: siteId, pdf }, 90000);
   const bytes = Uint8Array.from(atob(out.data), (c) => c.charCodeAt(0));
   return { name: out.name, blob: new Blob([bytes], { type: 'application/pdf' }) };
+}
+
+// A delegate's report for a QSP to correct (Brandon, 11/20): its newest record and photo list, then each photo as a Blob.
+export async function qspSource(siteId, key) {
+  const code = await kv.get('code');
+  return call({ action: 'qsp_source', code, site_id: siteId, key }, 60000);
+}
+
+export async function qspPhoto(siteId, key, fileId) {
+  const code = await kv.get('code');
+  const out = await call({ action: 'qsp_file', code, site_id: siteId, key, file_id: fileId }, 90000);
+  const bytes = Uint8Array.from(atob(out.data), (c) => c.charCodeAt(0));
+  return new Blob([bytes], { type: 'image/jpeg' });
 }
 
 // Any other request made with this phone's code (phone alerts: push_on, push_off, push_test).

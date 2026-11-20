@@ -298,7 +298,9 @@ function itemsBlock(r, photoNumbers) {
   const tz = r.tz;
   const all = [
     ...r.carried.map((x) => ({ ...x, carried: true })),
-    ...r.items.map((x) => ({ ...x, carried: false, status: 'open', date: x.opened || r.date, inspector: r.inspector.name })),
+    // an item a QSP added in his correction of a delegate's report is his (Brandon, 11/20)
+    ...r.items.map((x) => ({ ...x, carried: false, status: 'open', date: x.opened || r.date,
+      inspector: x.added_rev && r.corrected_by && x.added_rev === r.revision ? r.corrected_by.name : r.inspector.name })),
   ];
   if (!all.length) {
     out.push({ text: 'There are no action items.', color: MUTED });
@@ -452,7 +454,7 @@ function signatureBlock(r, sig) {
           stack: [
             sig ? { image: sig, width: 200 } : { text: '(no signature)', color: RED },
             { canvas: [{ type: 'line', x1: 0, y1: 2, x2: 220, y2: 2, lineWidth: 0.6, lineColor: INK }] },
-            { text: 'Electronic signature', fontSize: 7.5, color: MUTED, margin: [0, 2, 0, 0] },
+            { text: r.corrected_by ? `Electronic signature, on the correction (Revision ${r.revision})` : 'Electronic signature', fontSize: 7.5, color: MUTED, margin: [0, 2, 0, 0] },
           ],
         },
         {
@@ -460,7 +462,8 @@ function signatureBlock(r, sig) {
           table: {
             widths: [70, '*'],
             body: [
-              ['Inspector', r.signature.name],
+              // a QSP's correction of a delegate's report (Brandon, 11/20): the delegate inspected, the QSP signs
+              ...(r.corrected_by ? [['Inspected by', `${r.inspector.name}, ${r.inspector.title}`], ['Signed by', r.signature.name]] : [['Inspector', r.signature.name]]),
               ['Title', r.signature.title],
               ['Certification', r.signature.cert || '--'],
               ['Signed', dt(r.signature.signed_ms, tz)],
@@ -507,6 +510,7 @@ function correctionBlock(r) {
         widths: [130, '*'],
         body: [
           ['Revision', String(r.revision)],
+          ...(r.corrected_by ? [['Corrected by', `${r.corrected_by.name}, ${r.corrected_by.title}`]] : []),
           ['What changed, and why', r.revision_reason],
           // items this revision added (Brandon, 11/16): opened on the day of the correction, not the inspection's
           ...((r.items || []).some((x) => x.added_rev === r.revision)

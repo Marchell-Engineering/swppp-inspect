@@ -2,7 +2,7 @@
 // Everything is saved on the phone as it is typed; nothing needs signal until the upload.
 
 import { kv, reports, blobs, persist, uid } from './store.js';
-import { signIn, refreshConfig, flushQueue, net, act, rememberBackend, historyPdf } from './api.js';
+import { signIn, refreshConfig, flushQueue, net, act, rememberBackend, historyPdf, qspSource, qspPhoto } from './api.js';
 import { fetchForecast, fetchGauges, lastRain, classify, whatsDue, mergeSeen, unionSeen, typeReasons, eventText, localDate, fmtLocal } from './weather.js';
 import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL, shownSections, shownQuestions, TYPE_SECTIONS, LEADS, MISSED_REASONS } from './checklist.js';
 import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, exifGps, metres, SigPad } from './media.js';
@@ -1115,9 +1115,9 @@ function historyButton(site) {
   return h('button', { class: 'btn block', style: 'margin-top:8px', onclick: () => go({ name: 'history', id: site.id }) }, n ? `History (${n})` : 'History');
 }
 
-// `fix`: this phone's own signed copy of the report, when it has one (only the phone that made a report can
-// correct it, since the correction starts from its data and photos)
-function historyRow(site, r, fix) {
+// `fix`: this phone's own signed copy of the report, when it has one (the phone that made a report corrects it from
+// its own data and photos). `qsp`: a QSP's phone, which fetches a delegate's report to correct it (Brandon, 11/20)
+function historyRow(site, r, fix, qsp) {
   const slot = h('div', { class: 'row', style: 'justify-content:flex-end' });
   const note = h('div', { class: 'sub' });
   const get = h('button', { class: 'btn sm' }, 'Get the PDF');
@@ -1137,6 +1137,22 @@ function historyRow(site, r, fix) {
   if (r.pdf) slot.append(get);
   // Brandon 11/16: "I still don't see how to edit an inspection post-facto (like ComplianceGo would let you do)"
   if (fix) slot.append(h('button', { class: 'btn sm', onclick: () => startCorrection(fix) }, 'Correct'));
+  else if (qsp && r.qsp_fix) {
+    const btn = h('button', { class: 'btn sm' }, 'Correct');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Getting it…';
+      note.textContent = '';
+      try {
+        await startQspCorrection(site, r, (t) => { btn.textContent = t; });
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Correct';
+        note.textContent = navigator.onLine ? `That didn't work: ${e.message}` : 'Getting a report to correct needs signal.';
+      }
+    });
+    slot.append(btn);
+  }
   return reportRow(r, slot, note);
 }
 
@@ -1161,10 +1177,12 @@ async function renderHistory(id) {
   try { tab = (await kv.get('history_tab')) || 'reports'; } catch (e) { /* the default */ }
   const hv = historyView({
     rows: site.history, items: site.items, today, tab,
-    row: (r) => historyRow(site, r, mine[r.key]),
+    row: (r) => historyRow(site, r, mine[r.key], !!cfg.qsp_fix),
     onTab: (t) => { try { kv.set('history_tab', t); } catch (e) { /* a convenience only */ } },
     hints: {
-      reports: 'A report still uploading shows up here once it\'s filed. Correct shows on the reports this phone signed; a report from another phone is corrected on that phone.',
+      reports: cfg.qsp_fix
+        ? 'A report still uploading shows up here once it\'s filed. Correct shows on the reports this phone signed and, for you as the QSP, on your delegate\'s reports of the last 90 days (it needs signal to fetch them).'
+        : 'A report still uploading shows up here once it\'s filed. Correct shows on the reports this phone signed; a report from another phone is corrected on that phone.',
       empty: 'Nothing on file here yet.',
       missing: 'The history comes down the next time this phone has signal.',
     },
@@ -1370,7 +1388,7 @@ function missingAll() {
 // an inspection or a bank walk (not a couldn't-inspect record) by an inspector set up to be asked
 // (config/sites.json `ask_vehicle`)
 function asksVehicle(R) {
-  return (R.kind === 'inspection' || R.kind === 'bank') && !!(R.inspector && R.inspector.ask_vehicle);
+  return (R.kind === 'inspection' || R.kind === 'bank') && !R.corrected_by && !!(R.inspector && R.inspector.ask_vehicle);
 }
 
 function missingBanner() {
@@ -1455,7 +1473,9 @@ async function finish(btn) {
       if (wx && wx.forecast) applyWeather(wx);
     }
     R.finished_ms = Date.now();
-    R.signature = { signed_ms: R.finished_ms, name: R.inspector.name, title: R.inspector.title, cert: R.inspector.cert || '' };
+    // a QSP's correction of a delegate's report is signed by the QSP; the delegate stays the inspector (Brandon 11/20)
+    const signer = R.corrected_by || R.inspector;
+    R.signature = { signed_ms: R.finished_ms, name: signer.name, title: signer.title, cert: signer.cert || '' };
     // photo order in the PDF: open items, new items, problems (a bank walk's billed items, in draw order), then the site
     const billedOrder = (p) => (R.billed || []).findIndex((x) => 'billed:' + x.id === p.ref);
     const rank = (p) => ({ carried: 0, item: 1, q: 2, billed: 2, site: 3 }[p.ref.split(':')[0]] ?? 4);
@@ -1681,11 +1701,52 @@ async function startCorrection(orig) {
   go({ name: 'inspect', id });
 }
 
+// A QSP corrects a delegate's report (Brandon, 11/20: "Since Blake is my delegate, I need the ability to get into the app
+// and submit corrections as the QSP"). His phone doesn't hold it, so the newest version and its photos come from the
+// script. The delegate stays the inspector of record (his bill and the history keep his name); the QSP signs the
+// correction, and the PDF says so.
+async function startQspCorrection(site, row, progress) {
+  const root = row.key;
+  const line = (await reports.all()).filter((r) => (r.data.revises || r.data.id) === root);
+  const open = line.find((r) => r.status === 'draft');
+  if (open) return go({ name: 'inspect', id: open.id });
+  if (line.some((r) => r.status === 'signed')) return toast('The last correction is still uploading. Correct it again once it has.');
+  const cfg = await kv.get('config');
+  const src = await qspSource(site.id, root);
+  const latest = src.report;
+  const id = uid();
+  const R = JSON.parse(JSON.stringify(latest));
+  const me = cfg.inspector;
+  Object.assign(R, {
+    id, revises: root, revision: (latest.revision || 0) + 1, revision_reason: '',
+    supersedes: { id: src.record_id, revision: latest.revision || 0, signed_ms: latest.signature ? latest.signature.signed_ms : null },
+    signature: null, finished_ms: null, app_version: APP_VERSION,
+    corrected_by: { id: me.id, name: me.name, short: me.short, title: me.title, cert: me.cert || '', role: me.role },
+  });
+  delete R.vehicle_from;
+  const photos = [];
+  for (let i = 0; i < src.photos.length; i++) {
+    const p = src.photos[i];
+    const ph = R.photos.find((x) => x.id === p.photo_id);
+    if (!ph) continue;
+    progress(`Photo ${i + 1} of ${src.photos.length}…`);
+    await blobs.put(`photo:${id}:${ph.id}`, await qspPhoto(site.id, root, p.file_id));
+    photos.push(ph);
+  }
+  R.photos = photos;
+  R.voice = [];
+  const now = Date.now();
+  await reports.put({ id, site_id: site.id, status: 'draft', created_ms: now, updated_ms: now, data: R, files: [], fetched: true,
+    meta: { pdf_name: site.pdf_name, pdf_name_final: src.pdf_name } });
+  go({ name: 'inspect', id });
+}
+
 function correctionCard() {
   const { R } = cur;
   const signed = R.supersedes && R.supersedes.signed_ms ? ` (signed ${fmtLocal(R.supersedes.signed_ms, R.tz)})` : '';
+  const qsp = R.corrected_by ? ` ${R.inspector.name} stays the inspector; you sign the correction as ${R.corrected_by.title}.` : '';
   return card('fix', `Correcting the ${mdy(R.date)} ${R.kind === 'missed' ? 'record' : R.kind === 'bank' ? 'walk notes' : 'report'}`,
-    h('p', { class: 'hint', style: 'margin-top:0' }, `Revision ${R.revision} of the report${signed}. Change what was wrong, say what changed, and sign again. `
+    h('p', { class: 'hint', style: 'margin-top:0' }, `Revision ${R.revision} of the report${signed}.${qsp} Change what was wrong, say what changed, and sign again. `
       + 'The corrected report replaces the original under the same name; the original is kept, marked superseded. '
       + 'New action items can be added here, opened today. Items already on the signed report can\'t be dropped, and an open one can\'t be marked fixed; the next inspection does that.'),
     field('What changed, and why', h('textarea', { value: R.revision_reason, placeholder: 'e.g. Rain gauge reading was 0.30", not 3.0"', oninput: (e) => { R.revision_reason = e.target.value; save(); } })));
