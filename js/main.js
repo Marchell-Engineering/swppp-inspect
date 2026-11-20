@@ -1425,7 +1425,8 @@ function finishCard() {
   const canvas = h('canvas', { class: 'sig' });
   const btn = h('button', { class: 'btn primary block big', disabled: true }, 'Sign & finish');
   const clear = h('button', { class: 'btn sm ghost' }, 'Clear');
-  const ins = R.inspector;
+  // a QSP's correction of a delegate's report is signed by the QSP (Brandon, 11/20)
+  const ins = R.corrected_by || R.inspector;
   let banner = missingBanner();
   const el = card('finish', 'Sign & finish',
     banner,
