@@ -1,7 +1,8 @@
 // The offline layer: keeps a copy of the app on the phone so it opens with no signal. Bump VERSION with
 // every app change (tools/publish.sh does it), so phones pick up the new copy; the app then offers an
 // Update button on the sites screen, never in the middle of an inspection.
-const VERSION = 'v0.2.9-202611201452';
+const VERSION = 'v0.3.0-202611211924';
+importScripts('js/upload_core.js');   // the upload steps the app uses too (SwpppUpload)
 const CACHE = 'swppp-inspect-' + VERSION;
 const SHELL = [
   './',
@@ -18,6 +19,7 @@ const SHELL = [
   'js/pdf.js',
   'js/settings.js',
   'js/store.js',
+  'js/upload_core.js',
   'js/voice.js',
   'js/weather.js',
   'vendor/pdfmake.min.js',
@@ -57,20 +59,89 @@ self.addEventListener('notificationclick', (e) => {
 
 // the app's settings store (js/store.js), read and written from here
 function kv(op, key, value) {
-  return new Promise((resolve) => {
+  return idb('kv', op, key, value).catch(() => undefined);
+}
+
+// One read or write on the app's store (js/store.js): op is get, put or all. Rejects when the store can't be
+// read, so an upload stops rather than guessing.
+function idb(store, op, key, value) {
+  return new Promise((resolve, reject) => {
     const req = indexedDB.open('swppp-inspect');
-    req.onerror = () => resolve(undefined);
+    req.onerror = () => reject(req.error);
     req.onsuccess = () => {
       try {
-        const t = req.result.transaction('kv', op === 'get' ? 'readonly' : 'readwrite');
-        const r = op === 'get' ? t.objectStore('kv').get(key) : t.objectStore('kv').put(value, key);
-        t.oncomplete = () => resolve(op === 'get' ? r.result : undefined);
-        t.onerror = () => resolve(undefined);
+        const t = req.result.transaction(store, op === 'put' ? 'readwrite' : 'readonly');
+        const s = t.objectStore(store);
+        const r = op === 'all' ? s.getAll() : op === 'get' ? s.get(key) : s.keyPath ? s.put(value) : s.put(value, key);
+        t.oncomplete = () => { req.result.close(); resolve(op === 'put' ? undefined : r.result); };
+        t.onerror = () => { req.result.close(); reject(t.error); };
       } catch (err) {
-        resolve(undefined);
+        req.result.close();
+        reject(err);
       }
     };
   });
+}
+
+// Background upload (Brandon, 11/21): the app asks for it when it leaves the screen or loses signal with a report
+// still waiting, and Chrome runs it once there is signal, app open or not (Android only; an iPhone uploads while
+// the app is open). Chrome caps how long one pass runs and doesn't say how long, so a pass stops between steps
+// after BG_BUDGET_MS and asks for another; each step is saved, so nothing is sent twice.
+const BG_BUDGET_MS = 150e3;
+const BG_LOCK_WAIT_MS = 20e3;   // the app, just sent to the background, lets go of the upload between steps
+
+self.addEventListener('sync', (e) => {
+  if (e.tag === SwpppUpload.SYNC_TAG) e.waitUntil(backgroundUpload());
+});
+
+async function backgroundUpload() {
+  const U = SwpppUpload;
+  const t0 = Date.now();
+  const done = await U.withLock(BG_LOCK_WAIT_MS, async (held) => {
+    if (!held) return { busy: true };   // the app is uploading on screen
+    const code = await kv('get', 'code');
+    const url = await kv('get', 'backend_url');
+    if (!code || !url) return { filed: [] };
+    const io = {
+      code,
+      call: (payload, ms) => U.post(url, payload, ms),
+      getReport: (id) => idb('reports', 'get', id),
+      putReport: (r) => idb('reports', 'put', null, r),
+      getBlob: (k) => idb('blobs', 'get', k),
+      stop: () => Date.now() - t0 > BG_BUDGET_MS,
+    };
+    const waiting = (await idb('reports', 'all')).filter((r) => r.status === 'signed');
+    const filed = [];
+    for (const r of waiting) {
+      try {
+        if (await U.uploadOne(r.id, io)) filed.push(r);
+      } catch (err) {
+        if (err.name === 'Paused') return { filed, more: true };
+        await tellApp(filed);
+        throw err;   // no signal, or the script refused: Chrome tries again later
+      }
+    }
+    return { filed };
+  });
+  if (done.busy) return;
+  if (done.more) await self.registration.sync.register(U.SYNC_TAG).catch(() => {});
+  await tellApp(done.filed);
+}
+
+// An open app shows its own "Report filed"; with none on screen, a phone with alerts on gets a notice.
+async function tellApp(filed) {
+  if (!filed || !filed.length) return;
+  const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const w of wins) w.postMessage({ type: 'uploaded', filed: filed.length });
+  if (wins.some((w) => w.visibilityState === 'visible')) return;
+  if (self.Notification && Notification.permission !== 'granted') return;
+  for (const r of filed) {
+    const site = (r.data && r.data.site && (r.data.site.short_name || r.data.site.name)) || 'Report';
+    await self.registration.showNotification('Report filed', {
+      body: `${site}, ${(r.data && r.data.date) || ''}: uploaded in the background.`.replace(', :', ':'),
+      tag: 'swppp-filed-' + r.id, icon: 'img/icon-192.png', badge: 'img/icon-192.png',
+    }).catch(() => {});
+  }
 }
 
 async function showAlerts() {

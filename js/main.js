@@ -2,7 +2,7 @@
 // Everything is saved on the phone as it is typed; nothing needs signal until the upload.
 
 import { kv, reports, blobs, persist, uid } from './store.js';
-import { signIn, refreshConfig, flushQueue, net, act, rememberBackend, historyPdf, qspSource, qspPhoto } from './api.js';
+import { signIn, refreshConfig, flushQueue, askBackgroundUpload, net, act, rememberBackend, historyPdf, qspSource, qspPhoto } from './api.js';
 import { fetchForecast, fetchGauges, lastRain, classify, whatsDue, mergeSeen, unionSeen, typeReasons, eventText, localDate, fmtLocal } from './weather.js';
 import { SECTIONS, ALL_QUESTIONS, TYPES, PHASES, PRIORITY_DAYS, NAL, shownSections, shownQuestions, TYPE_SECTIONS, LEADS, MISSED_REASONS } from './checklist.js';
 import { shrinkPhoto, photoDataUrl, blobToDataUrl, where, exifGps, metres, SigPad } from './media.js';
@@ -1782,35 +1782,76 @@ function filedNote(rec) {
 
 // A phone says it has signal a moment before data really flows, so a failed try is retried after
 // 10 s, 30 s, then every minute; the 90 s timer and reopening the app also try.
+// In the background (Brandon, 11/21): when the app leaves the screen with a report still going up, it stops
+// between steps and asks the offline layer (sw.js) to finish on its own, which Chrome on Android does even with
+// the app closed. While the app uploads on screen, it keeps the screen awake so the phone doesn't lock mid-upload.
 let retryTimer = null;
 let retryStep = 0;
+let handoff = null;   // stops the on-screen upload when the app goes to the background
 
 async function flush(loud) {
   const waiting = (await reports.all()).filter((r) => r.status === 'signed');
   if (!waiting.length) return;
   if (!navigator.onLine) {
+    askBackgroundUpload();
     if (loud) toast('No signal yet. It will upload once there is some.');
     return;
   }
-  const { filed, failed } = await flushQueue((r, text) => {
-    uploadNote[r.id] = text;
-    const el = document.getElementById('up-' + r.id);
-    if (el) el.lastChild.textContent = text;
-  });
+  if (document.visibilityState !== 'visible') {
+    askBackgroundUpload();
+    return;
+  }
+  handoff = new AbortController();
+  const awake = await keepAwake();
+  let res;
+  try {
+    res = await flushQueue((r, text) => {
+      uploadNote[r.id] = text;
+      const el = document.getElementById('up-' + r.id);
+      if (el) el.lastChild.textContent = text;
+    }, handoff.signal);
+  } finally {
+    handoff = null;
+    if (awake) awake.release().catch(() => {});
+  }
+  const { filed, failed, busy, handed } = res;
   netBadge();
   clearTimeout(retryTimer);
-  if (failed) {
+  if (busy) {
+    // the offline layer has it: check back shortly, and it says when it's done
+    for (const r of waiting) uploadNote[r.id] = 'Uploading in the background.';
+    retryTimer = setTimeout(() => flush(), 30e3);
+  } else if (handed) {
+    askBackgroundUpload();
+  } else if (failed) {
+    askBackgroundUpload();
     retryTimer = setTimeout(() => flush(), [10e3, 30e3, 60e3][Math.min(retryStep, 2)]);
     retryStep += 1;
     if (loud) toast('Not through yet. It will keep trying.');
   } else {
     retryStep = 0;
   }
-  if (filed) {
-    toast(filed === 1 ? 'Report filed.' : `${filed} reports filed.`);
-    syncConfig().then(() => { if (view.name === 'home') renderHome(); });
-  }
+  if (filed) afterFiled(filed);
   if (view.name === 'home' || view.name === 'done') render();
+}
+
+function afterFiled(filed) {
+  toast(filed === 1 ? 'Report filed.' : `${filed} reports filed.`);
+  syncConfig().then(() => { if (view.name === 'home') renderHome(); });
+}
+
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator) return await navigator.wakeLock.request('screen');
+  } catch (e) { /* low battery or not allowed: upload anyway */ }
+  return null;
+}
+
+// the app left the screen: stop between steps, and let the background finish
+async function toBackground() {
+  if (!(await reports.all()).some((r) => r.status === 'signed')) return;
+  askBackgroundUpload();
+  if (handoff) handoff.abort();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1831,6 +1872,12 @@ function registerSW() {
     if (reg.waiting && navigator.serviceWorker.controller) swWaiting = reg.waiting;
     reg.addEventListener('updatefound', () => watch(reg.installing));
   }).catch(() => {});
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'uploaded' && e.data.filed) {
+      afterFiled(e.data.filed);
+      if (view.name === 'home' || view.name === 'done') render();
+    }
+  });
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     // not during an inspection, and not on the sign-in screen: on a phone's first visit the offline layer takes over
@@ -1849,7 +1896,7 @@ async function boot() {
   window.addEventListener('offline', netBadge);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') { flush(); prefetchWeather(); }
-    else saveNow();
+    else { saveNow(); toBackground(); }
   });
   setInterval(() => flush(), 90e3);
 
